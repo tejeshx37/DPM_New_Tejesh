@@ -261,6 +261,32 @@ fn generate_boundary_id_to_point_count_map(
     )
 }
 
+/// 2D pipeline — the current production mesh implementation. New 2D code
+/// should reach for `mesh::d2::*` rather than the crate root; the crate root
+/// re-exports are kept for backward compatibility.
+pub mod d2 {
+    pub use crate::{
+        BoundaryIdToCountMap, Callback, Constraint, Mesh, PointIdxToIdsMap, State,
+    };
+}
+
+/// 3D pipeline — placeholder stubs. Tetrahedral meshing for the four
+/// primitive shapes (Cube, Cuboid, Sphere, Cylinder) lands in Step 3 of the
+/// refactor; this module exists so downstream code can already reference
+/// `mesh::d3::*` paths.
+pub mod d3 {
+    use nalgebra::Vector3;
+
+    /// 3D tetrahedral mesh — vertices plus 4-index tets. Step 3 fills in the
+    /// generation logic; for now this is a passive container.
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[derive(Debug, Clone, Default)]
+    pub struct Mesh3D {
+        pub vertices: Vec<Vector3<f64>>,
+        pub tetrahedra: Vec<[usize; 4]>,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Callback, Mesh, State};
