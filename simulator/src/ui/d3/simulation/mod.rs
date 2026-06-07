@@ -9,8 +9,8 @@
 use std::collections::HashMap;
 
 use cpd::d3::{
-    Axis, BoundaryCondition3D, Computer3D, Config3D, FailureCriteria3D, IsotropicProps3D,
-    MaterialProps3D, OrthotropicProps3D, RegionAverages, StressStats,
+    Axis, AxisTimeSeries, BoundaryCondition3D, Computer3D, Config3D, FailureCriteria3D,
+    IsotropicProps3D, MaterialProps3D, OrthotropicProps3D, RegionAverages, StressStats,
 };
 use egui::{Color32, ComboBox, DragValue, Sense, SidePanel, Slider, Stroke, TopBottomPanel, Ui, Vec2};
 use egui_plot::{Line, Plot, PlotPoints};
@@ -57,6 +57,20 @@ pub struct State {
     /// Plots panel visibility + tunables.
     #[serde(default)]
     pub plots: PlotConfig,
+    /// Per-element / per-vertex inspection picks (A5). One-based index in
+    /// the UI for ergonomics; converted to 0-based when accessed.
+    #[serde(default)]
+    pub inspect: InspectConfig,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct InspectConfig {
+    /// 1-based index, 0 = disabled.
+    #[serde(default)]
+    pub element_index: u32,
+    /// 1-based index, 0 = disabled.
+    #[serde(default)]
+    pub vertex_index: u32,
 }
 
 /// History buffer for time-series plotting. Capped at `MAX_SAMPLES` with
@@ -67,6 +81,10 @@ pub struct History {
     /// Per-region (mean_displacement, mean_force) over time. Key is the
     /// boundary region name from the mesh.
     pub regions: std::collections::HashMap<String, Vec<(f32, RegionAverages)>>,
+    /// Inspected element Von Mises stress history (A5).
+    pub element: Vec<(f32, f32)>,
+    /// Inspected vertex (displacement magnitude, force magnitude) history (A5).
+    pub vertex: Vec<(f32, f32, f32)>,
 }
 
 const MAX_SAMPLES: usize = 5000;
@@ -75,6 +93,8 @@ impl History {
     pub fn clear(&mut self) {
         self.stress.clear();
         self.regions.clear();
+        self.element.clear();
+        self.vertex.clear();
     }
 
     fn push_stress(&mut self, t: f32, s: StressStats) {
@@ -89,6 +109,20 @@ impl History {
         v.push((t, a));
         if v.len() > MAX_SAMPLES {
             v.drain(0..MAX_SAMPLES / 2);
+        }
+    }
+
+    fn push_element(&mut self, t: f32, vm: f32) {
+        self.element.push((t, vm));
+        if self.element.len() > MAX_SAMPLES {
+            self.element.drain(0..MAX_SAMPLES / 2);
+        }
+    }
+
+    fn push_vertex(&mut self, t: f32, disp_mag: f32, force_mag: f32) {
+        self.vertex.push((t, disp_mag, force_mag));
+        if self.vertex.len() > MAX_SAMPLES {
+            self.vertex.drain(0..MAX_SAMPLES / 2);
         }
     }
 }
@@ -114,6 +148,9 @@ pub struct PlotConfig {
     /// Per-region force magnitude on the force plot.
     #[serde(default = "default_true")]
     pub show_region_force: bool,
+    /// Inspect-element / inspect-vertex plot (A5).
+    #[serde(default = "default_true")]
+    pub show_inspect: bool,
 }
 
 fn default_true() -> bool {
@@ -133,6 +170,7 @@ impl Default for PlotConfig {
             show_vm_max: true,
             show_region_displacement: true,
             show_region_force: true,
+            show_inspect: true,
         }
     }
 }
@@ -162,6 +200,7 @@ impl Default for State {
             stats: StressStats::default(),
             history: History::default(),
             plots: PlotConfig::default(),
+            inspect: InspectConfig::default(),
         }
     }
 }
@@ -173,6 +212,10 @@ pub struct RegionBc {
     pub force: [f32; 3],
     pub displacement: [f32; 3],
     pub ramp_seconds: f32,
+    /// Per-axis keyframes for TimeForce / TimeDisplacement BCs. Shared
+    /// between the two so users can swap kinds without retyping.
+    #[serde(default)]
+    pub time_profile: AxisTimeSeries,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -182,6 +225,8 @@ pub enum BcKind {
     Pinned,
     ConstantForce,
     ConstantDisplacement,
+    TimeForce,
+    TimeDisplacement,
 }
 
 impl BcKind {
@@ -191,6 +236,8 @@ impl BcKind {
             BcKind::Pinned => "Pinned",
             BcKind::ConstantForce => "Constant Force",
             BcKind::ConstantDisplacement => "Constant Displacement",
+            BcKind::TimeForce => "Time Force",
+            BcKind::TimeDisplacement => "Time Displacement",
         }
     }
 }
@@ -205,6 +252,13 @@ impl RegionBc {
                 axes: self.axes,
                 displacement: self.displacement,
                 ramp_seconds: self.ramp_seconds,
+            },
+            BcKind::TimeForce => BoundaryCondition3D::TimeForce {
+                profile: self.time_profile.clone(),
+            },
+            BcKind::TimeDisplacement => BoundaryCondition3D::TimeDisplacement {
+                axes: self.axes,
+                profile: self.time_profile.clone(),
             },
         }
     }
@@ -237,6 +291,7 @@ pub fn show(state: &mut State, meshes: &[Option<Mesh3D>], ui: &mut Ui) {
             ui.collapsing("Boundary Conditions", |ui| {
                 add_bc_controls(state, mesh, ui)
             });
+            ui.collapsing("Inspect", |ui| add_inspect_controls(state, ui));
 
             ui.separator();
             add_run_controls(state, mesh, ui);
@@ -262,6 +317,20 @@ pub fn show(state: &mut State, meshes: &[Option<Mesh3D>], ui: &mut Ui) {
                         for region in &mesh.boundary_faces.regions {
                             let avg = c.region_averages(&region.vertices);
                             state.history.push_region(&region.name, t, avg);
+                        }
+                    }
+                    if state.inspect.element_index > 0 {
+                        let idx = (state.inspect.element_index - 1) as usize;
+                        if let Some(e) = c.elements.get(idx) {
+                            state.history.push_element(t, von_mises_of(&e.stress));
+                        }
+                    }
+                    if state.inspect.vertex_index > 0 {
+                        let idx = (state.inspect.vertex_index - 1) as usize;
+                        if let Some(n) = c.nodes.get(idx) {
+                            let disp = (n.position - n.initial_position).norm();
+                            let force = n.force.norm();
+                            state.history.push_vertex(t, disp, force);
                         }
                     }
                 }
@@ -456,6 +525,8 @@ fn add_bc_controls(state: &mut State, mesh: &Mesh3D, ui: &mut Ui) {
                         BcKind::Pinned,
                         BcKind::ConstantForce,
                         BcKind::ConstantDisplacement,
+                        BcKind::TimeForce,
+                        BcKind::TimeDisplacement,
                     ] {
                         ui.selectable_value(&mut entry.kind, k, k.label());
                     }
@@ -480,8 +551,80 @@ fn add_bc_controls(state: &mut State, mesh: &Mesh3D, ui: &mut Ui) {
                         );
                     });
                 }
+                BcKind::TimeForce => {
+                    time_profile_editor(&region.name, &mut entry.time_profile, ui);
+                }
+                BcKind::TimeDisplacement => {
+                    axes_row(ui, &mut entry.axes);
+                    time_profile_editor(&region.name, &mut entry.time_profile, ui);
+                }
             }
         });
+    }
+}
+
+fn time_profile_editor(region_name: &str, profile: &mut AxisTimeSeries, ui: &mut Ui) {
+    ui.label("Keyframes (time, value) per axis");
+    for (axis_label, series) in [
+        ("X", &mut profile.x),
+        ("Y", &mut profile.y),
+        ("Z", &mut profile.z),
+    ] {
+        ui.collapsing(
+            format!("{axis_label} — {} pts", series.points.len()),
+            |ui| {
+                let id_suffix = format!("{region_name}_{axis_label}");
+                let mut remove: Option<usize> = None;
+                for (idx, (t, v)) in series.points.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("{idx}:"));
+                        ui.label("t");
+                        ui.add(DragValue::new(t).speed(0.001).clamp_range(0.0..=f32::MAX));
+                        ui.label("v");
+                        ui.add(DragValue::new(v).speed(0.01));
+                        if ui.small_button("x").clicked() {
+                            remove = Some(idx);
+                        }
+                    });
+                    let _ = &id_suffix;
+                }
+                if let Some(i) = remove {
+                    series.points.remove(i);
+                }
+                if ui.button("+ keyframe").clicked() {
+                    let next_t = series.points.last().map(|(t, _)| *t + 0.001).unwrap_or(0.0);
+                    let next_v = series.points.last().map(|(_, v)| *v).unwrap_or(0.0);
+                    series.push_keyframe(next_t, next_v);
+                }
+            },
+        );
+    }
+}
+
+fn add_inspect_controls(state: &mut State, ui: &mut Ui) {
+    ui.label("Per-element / per-vertex history (A5).");
+    ui.label("Enter a 1-based index, or 0 to disable. Reset clears history.");
+    ui.horizontal(|ui| {
+        ui.label("Element");
+        ui.add(
+            DragValue::new(&mut state.inspect.element_index)
+                .speed(1.0)
+                .clamp_range(0..=u32::MAX),
+        );
+    });
+    if let Some(c) = state.computer.as_ref() {
+        ui.label(format!("(of {} elements)", c.elements.len()));
+    }
+    ui.horizontal(|ui| {
+        ui.label("Vertex");
+        ui.add(
+            DragValue::new(&mut state.inspect.vertex_index)
+                .speed(1.0)
+                .clamp_range(0..=u32::MAX),
+        );
+    });
+    if let Some(c) = state.computer.as_ref() {
+        ui.label(format!("(of {} nodes)", c.nodes.len()));
     }
 }
 
@@ -587,9 +730,12 @@ fn add_plots(state: &mut State, ui: &mut Ui) {
         ui.separator();
         ui.checkbox(&mut state.plots.show_region_displacement, "Region |u|");
         ui.checkbox(&mut state.plots.show_region_force, "Region |F|");
+        ui.separator();
+        ui.checkbox(&mut state.plots.show_inspect, "Inspect");
     });
+    let cols = if state.plots.show_inspect { 4.0 } else { 3.0 };
     let total = ui.available_width().max(300.0);
-    let panel_w = (total / 3.0).max(150.0);
+    let panel_w = (total / cols).max(150.0);
     let panel_h = ui.available_height().max(120.0);
 
     ui.horizontal(|ui| {
@@ -669,6 +815,55 @@ fn add_plots(state: &mut State, ui: &mut Ui) {
                     }
                 });
         });
+        if state.plots.show_inspect {
+            ui.allocate_ui(Vec2::new(panel_w, panel_h), |ui| {
+                ui.label(format!(
+                    "Inspect (elem #{}, vert #{})",
+                    state.inspect.element_index, state.inspect.vertex_index
+                ));
+                Plot::new("d3_inspect_plot")
+                    .height(panel_h - 20.0)
+                    .show(ui, |plot_ui| {
+                        if !state.history.element.is_empty() {
+                            plot_ui.line(
+                                Line::new(PlotPoints::from_iter(
+                                    state
+                                        .history
+                                        .element
+                                        .iter()
+                                        .map(|(t, v)| [*t as f64, *v as f64]),
+                                ))
+                                .color(Color32::from_rgb(240, 100, 100))
+                                .name("element VM"),
+                            );
+                        }
+                        if !state.history.vertex.is_empty() {
+                            plot_ui.line(
+                                Line::new(PlotPoints::from_iter(
+                                    state
+                                        .history
+                                        .vertex
+                                        .iter()
+                                        .map(|(t, d, _)| [*t as f64, *d as f64]),
+                                ))
+                                .color(Color32::from_rgb(120, 220, 120))
+                                .name("vertex |u|"),
+                            );
+                            plot_ui.line(
+                                Line::new(PlotPoints::from_iter(
+                                    state
+                                        .history
+                                        .vertex
+                                        .iter()
+                                        .map(|(t, _, f)| [*t as f64, *f as f64]),
+                                ))
+                                .color(Color32::from_rgb(100, 160, 240))
+                                .name("vertex |F|"),
+                            );
+                        }
+                    });
+            });
+        }
     });
 }
 
@@ -940,6 +1135,42 @@ fn paint_bc_overlays(
                         region.name,
                         axes_label(bc.axes),
                         d.norm()
+                    ),
+                    Color32::from_rgb(160, 240, 160),
+                );
+            }
+            BcKind::TimeForce => {
+                // Indicate a time-varying force using a chevron-style label
+                // anchored at the region centroid. Its direction varies
+                // with time so a static arrow would be misleading.
+                draw_label(
+                    painter,
+                    rect,
+                    view_proj,
+                    base + normal * scene_scale * 0.05,
+                    &format!(
+                        "{}: F(t) ({} keyframes)",
+                        region.name,
+                        bc.time_profile.x.points.len()
+                            + bc.time_profile.y.points.len()
+                            + bc.time_profile.z.points.len()
+                    ),
+                    Color32::from_rgb(255, 200, 100),
+                );
+            }
+            BcKind::TimeDisplacement => {
+                draw_label(
+                    painter,
+                    rect,
+                    view_proj,
+                    base + normal * scene_scale * 0.05,
+                    &format!(
+                        "{}: u(t) {} ({} keyframes)",
+                        region.name,
+                        axes_label(bc.axes),
+                        bc.time_profile.x.points.len()
+                            + bc.time_profile.y.points.len()
+                            + bc.time_profile.z.points.len()
                     ),
                     Color32::from_rgb(160, 240, 160),
                 );

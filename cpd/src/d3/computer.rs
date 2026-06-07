@@ -174,6 +174,26 @@ impl Computer3D {
                         n.velocity.z = 0.0;
                     }
                 }
+                BoundaryCondition3D::TimeForce { profile } => {
+                    n.force += profile.evaluate(t);
+                    integrate_free(n, damping, dt);
+                }
+                BoundaryCondition3D::TimeDisplacement { axes, profile } => {
+                    integrate_free(n, damping, dt);
+                    let target = profile.evaluate(t);
+                    if axes.x {
+                        n.position.x = n.initial_position.x + target.x;
+                        n.velocity.x = 0.0;
+                    }
+                    if axes.y {
+                        n.position.y = n.initial_position.y + target.y;
+                        n.velocity.y = 0.0;
+                    }
+                    if axes.z {
+                        n.position.z = n.initial_position.z + target.z;
+                        n.velocity.z = 0.0;
+                    }
+                }
             }
         });
 
