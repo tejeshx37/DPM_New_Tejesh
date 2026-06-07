@@ -7,11 +7,13 @@
 //! backend can replace this without touching the page or dialog code.
 
 pub mod camera;
+#[allow(dead_code)]
 pub mod mesh_builder;
+pub mod scene_mesh;
+pub mod wgpu_scene;
 
 use camera::OrbitCamera;
 use egui::{Color32, Pos2, Sense, Stroke, Ui, Vec2};
-use mesh_builder::Edge;
 use nalgebra::{Matrix4, Point3, Vector3};
 use serde::{Deserialize, Serialize};
 
@@ -92,20 +94,22 @@ pub fn show(state: &mut ViewportState, geometry: &Geometry3D, ui: &mut Ui) {
 
 fn paint_scene(camera: &OrbitCamera, rect: egui::Rect, painter: &egui::Painter, geometry: &Geometry3D) {
     let view_proj = camera.view_projection(rect.width() / rect.height().max(1.0));
+    let mut tris = Vec::new();
     for (shape, op) in &geometry.shapes {
-        let edges = mesh_builder::edges_for(shape);
         let color = match op {
-            CsgOp3D::Union => Color32::from_rgb(120, 200, 255),
-            CsgOp3D::Difference => Color32::from_rgb(255, 140, 140),
+            CsgOp3D::Union => [0.47, 0.78, 1.0, 0.95],
+            CsgOp3D::Difference => [1.0, 0.55, 0.55, 0.35],
         };
-        let stroke = Stroke::new(1.2, color);
-        for Edge { a, b } in edges {
-            if let (Some(pa), Some(pb)) = (project(&view_proj, rect, a), project(&view_proj, rect, b))
-            {
-                painter.line_segment([pa, pb], stroke);
-            }
-        }
+        tris.extend(scene_mesh::triangles_for(shape, color));
     }
+    if tris.is_empty() {
+        return;
+    }
+    wgpu_scene::sort_back_to_front(&mut tris, &view_proj);
+    let callback = wgpu_scene::SceneCallback::from_world_mvp(tris, &view_proj);
+    painter.add(eframe::egui_wgpu::Callback::new_paint_callback(
+        rect, callback,
+    ));
 }
 
 fn paint_world_axes(camera: &OrbitCamera, rect: egui::Rect, painter: &egui::Painter) {

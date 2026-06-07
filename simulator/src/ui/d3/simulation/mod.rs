@@ -17,7 +17,9 @@ use mesh::d3::Mesh3D;
 use nalgebra::Vector3;
 use serde::{Deserialize, Serialize};
 
-use super::drawing::viewport::{camera::OrbitCamera, project, ViewportState};
+use super::drawing::viewport::{
+    camera::OrbitCamera, scene_mesh, wgpu_scene, ViewportState,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct State {
@@ -638,43 +640,49 @@ fn show_viewport(state: &mut State, meshes: &[Option<Mesh3D>], ui: &mut Ui) {
         .camera
         .view_projection(rect.width() / rect.height().max(1.0));
 
-    // If we have a running computer, draw the deformed mesh colored by
-    // per-tet Von Mises stress. Otherwise fall back to the reference mesh
-    // wireframe.
-    if let Some(c) = state.computer.as_ref() {
+    // If we have a running computer, draw the deformed mesh surface
+    // colored by Von Mises stress averaged over each vertex's incident
+    // tets. Otherwise show the reference mesh's surface in solid grey.
+    let active_mesh = meshes.get(state.selected_mesh).and_then(|m| m.as_ref());
+    if let (Some(c), Some(mesh)) = (state.computer.as_ref(), active_mesh) {
         let s_min = state.stats.min_von_mises;
         let s_max = state.stats.max_von_mises.max(s_min + 1e-12);
+
+        // Per-vertex average Von Mises: build a vertex->tets incidence on
+        // the fly. Cheap relative to the per-element stress eval.
+        let mut vm_sum = vec![0.0_f32; c.nodes.len()];
+        let mut vm_count = vec![0_u32; c.nodes.len()];
         for e in &c.elements {
             let vm = von_mises_of(&e.stress);
-            let t = ((vm - s_min) / (s_max - s_min)).clamp(0.0, 1.0);
-            let color = heatmap(t);
-            let stroke = Stroke::new(0.6, color);
-            let p: [Vector3<f64>; 4] = [
-                vec3_f64(&c.nodes[e.indices[0]].position),
-                vec3_f64(&c.nodes[e.indices[1]].position),
-                vec3_f64(&c.nodes[e.indices[2]].position),
-                vec3_f64(&c.nodes[e.indices[3]].position),
-            ];
-            for (a, b) in [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)] {
-                if let (Some(pa), Some(pb)) = (
-                    project(&view_proj, rect, p[a]),
-                    project(&view_proj, rect, p[b]),
-                ) {
-                    painter.line_segment([pa, pb], stroke);
-                }
+            for &i in &e.indices {
+                vm_sum[i] += vm;
+                vm_count[i] += 1;
             }
         }
-    } else if let Some(mesh) = meshes.get(state.selected_mesh).and_then(|m| m.as_ref()) {
-        let stroke = Stroke::new(0.5, Color32::from_gray(140));
-        for tet in &mesh.tetrahedra {
-            for (a, b) in [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)] {
-                if let (Some(pa), Some(pb)) = (
-                    project(&view_proj, rect, mesh.vertices[tet[a]]),
-                    project(&view_proj, rect, mesh.vertices[tet[b]]),
-                ) {
-                    painter.line_segment([pa, pb], stroke);
-                }
-            }
+        let positions_f32: Vec<Vector3<f32>> =
+            c.nodes.iter().map(|n| n.position).collect();
+        let color_for = |i: usize| -> [f32; 4] {
+            let avg = if vm_count[i] > 0 {
+                vm_sum[i] / vm_count[i] as f32
+            } else {
+                0.0
+            };
+            let t = ((avg - s_min) / (s_max - s_min)).clamp(0.0, 1.0);
+            color32_to_f32_rgba(heatmap(t))
+        };
+        let mut tris = scene_mesh::triangles_for_deformed(mesh, &positions_f32, color_for);
+        if !tris.is_empty() {
+            wgpu_scene::sort_back_to_front(&mut tris, &view_proj);
+            let cb = wgpu_scene::SceneCallback::from_world_mvp(tris, &view_proj);
+            painter.add(eframe::egui_wgpu::Callback::new_paint_callback(rect, cb));
+        }
+    } else if let Some(mesh) = active_mesh {
+        let grey = [0.65, 0.65, 0.68, 1.0];
+        let mut tris = scene_mesh::triangles_for_mesh(mesh, |_| grey);
+        if !tris.is_empty() {
+            wgpu_scene::sort_back_to_front(&mut tris, &view_proj);
+            let cb = wgpu_scene::SceneCallback::from_world_mvp(tris, &view_proj);
+            painter.add(eframe::egui_wgpu::Callback::new_paint_callback(rect, cb));
         }
     }
 
@@ -739,6 +747,17 @@ fn paint_color_bar(painter: &egui::Painter, rect: egui::Rect, vmin: f32, vmax: f
     );
 }
 
+fn color32_to_f32_rgba(c: Color32) -> [f32; 4] {
+    let [r, g, b, a] = c.to_array();
+    [
+        r as f32 / 255.0,
+        g as f32 / 255.0,
+        b as f32 / 255.0,
+        a as f32 / 255.0,
+    ]
+}
+
+#[allow(dead_code)]
 fn vec3_f64(v: &Vector3<f32>) -> Vector3<f64> {
     Vector3::new(v.x as f64, v.y as f64, v.z as f64)
 }
