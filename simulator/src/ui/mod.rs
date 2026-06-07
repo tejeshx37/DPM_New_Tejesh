@@ -3,6 +3,7 @@ pub mod app;
 mod always_open_window;
 pub mod boundary_conditions;
 mod close_project_dialog;
+pub mod d3;
 mod delete_project_dialog;
 mod dialog_utils;
 pub mod drawing;

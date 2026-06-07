@@ -3,8 +3,9 @@ use super::{
 };
 use crate::{
     model::project::{ClosedHandle, Manager, OpenHandle, UntitledHandle, PROJECT_FILE_EXT},
-    ui::error_dialog,
+    ui::{d3, error_dialog},
 };
+use cpd::Dimension;
 use eframe::{CreationContext, Frame};
 use egui::{
     menu, Button, CentralPanel, Context, Image, Key, KeyboardShortcut, Modifiers, SidePanel,
@@ -38,6 +39,13 @@ shortcut!(TOGGLE_PROJECT_PANEL, Modifiers::COMMAND, Key::P);
 struct PageData {
     page: Page,
     show_disjoint_dialog: bool,
+    /// Project dimension. Defaults to 2D so projects saved before this field
+    /// existed deserialize correctly. Immutable once a project is created.
+    #[serde(default)]
+    dimension: Dimension,
+    /// State for the 3D pipeline. Empty for 2D projects.
+    #[serde(default)]
+    d3_state: d3::State,
 }
 
 impl Default for PageData {
@@ -45,6 +53,17 @@ impl Default for PageData {
         Self {
             page: Page::drawing(),
             show_disjoint_dialog: false,
+            dimension: Dimension::D2,
+            d3_state: d3::State::default(),
+        }
+    }
+}
+
+impl PageData {
+    fn new_with_dimension(dimension: Dimension) -> Self {
+        Self {
+            dimension,
+            ..Self::default()
         }
     }
 }
@@ -177,7 +196,14 @@ impl App {
             ui.menu_button("File", |ui| self.add_file_menu_items(ui));
             ui.menu_button("View", |ui| self.add_view_menu_items(ui));
             if let Some(page_data) = self.page_data() {
-                page_data.page = mem::take(&mut page_data.page).add_menu_items(ui);
+                let dimension = page_data.dimension;
+                // 2D pipeline gets the existing per-page menu items; 3D has
+                // no page-specific menu yet (drawing-only milestone).
+                if matches!(dimension, Dimension::D2) {
+                    page_data.page = mem::take(&mut page_data.page).add_menu_items(ui);
+                }
+                ui.separator();
+                ui.label(format!("Mode: {}", dimension.label()));
             }
             ui.centered_and_justified(|ui| {
                 ui.label(format!("Workspace - {}", self.project_manager.workspace()));
@@ -216,22 +242,37 @@ impl App {
 
     fn add_new_project_menu_button(&mut self, ui: &mut Ui) {
         puffin::profile_function!();
-        if !Self::button_with_shortcut_clicked(ui, "New Project", &NEW_PROJECT_SHORTCUT) {
-            return;
+        if Self::button_with_shortcut_clicked(ui, "New 2D Project", &NEW_PROJECT_SHORTCUT) {
+            ui.close_menu();
+            self.create_untitled_project_with_dimension(Dimension::D2);
         }
-        ui.close_menu();
-        self.create_untitled_project();
+        if ui.button("New 3D Project").clicked() {
+            ui.close_menu();
+            self.create_untitled_project_with_dimension(Dimension::D3);
+        }
     }
 
     fn create_untitled_project(&mut self) {
+        self.create_untitled_project_with_dimension(Dimension::D2);
+    }
+
+    fn create_untitled_project_with_dimension(&mut self, dimension: Dimension) {
         puffin::profile_function!();
         self.project_manager.create_untitled_project();
-        self.project_handle = ProjectHandle::Untitled(
-            self.project_manager
-                .untitled_project_handles()
-                .last()
-                .expect("At least one untitled project handle should exist"),
-        );
+        let handle = self
+            .project_manager
+            .untitled_project_handles()
+            .last()
+            .expect("At least one untitled project handle should exist");
+        // Override the freshly-defaulted PageData to record the chosen
+        // dimension. PageData::default() gives D2; for D3 projects we swap
+        // in a fresh PageData with the dimension flag set.
+        if matches!(dimension, Dimension::D3) {
+            use std::ops::DerefMut;
+            let project = &mut self.project_manager[handle];
+            *project.state_mut().deref_mut() = PageData::new_with_dimension(Dimension::D3);
+        }
+        self.project_handle = ProjectHandle::Untitled(handle);
     }
 
     fn add_open_project_menu_button(&mut self, ui: &mut Ui) {
@@ -800,19 +841,26 @@ impl App {
             return;
         };
 
-        if page_data.show_disjoint_dialog
-            && error_dialog::show(
-                "There are disjoint shapes, please merge them or remove",
-                ui.ctx(),
-            )
-            .closed()
-        {
-            page_data.show_disjoint_dialog = false;
-        }
+        match page_data.dimension {
+            Dimension::D2 => {
+                if page_data.show_disjoint_dialog
+                    && error_dialog::show(
+                        "There are disjoint shapes, please merge them or remove",
+                        ui.ctx(),
+                    )
+                    .closed()
+                {
+                    page_data.show_disjoint_dialog = false;
+                }
 
-        ui.vertical_centered_justified(|ui| {
-            page_data.page = mem::take(&mut page_data.page).add_contents(ui);
-        });
+                ui.vertical_centered_justified(|ui| {
+                    page_data.page = mem::take(&mut page_data.page).add_contents(ui);
+                });
+            }
+            Dimension::D3 => {
+                d3::drawing::show(&mut page_data.d3_state.drawing, ui);
+            }
+        }
     }
 
     fn has_projects_to_show(&self) -> bool {
