@@ -1,18 +1,29 @@
 //! 3D pipeline UI — drawing, meshing, and simulation pages for projects
-//! created in 3D mode. Meshing and simulation are stubs in this milestone;
-//! drawing is wired up to the parametric Shape3D dialogs and the preview
-//! viewport.
+//! created in 3D mode. Drawing and meshing are wired up; simulation lands
+//! in the next milestone alongside the 3D DPM solver.
 
 pub mod drawing;
+pub mod meshing;
 
 use serde::{Deserialize, Serialize};
 
+/// Active page within the 3D pipeline. Stored in the project so the
+/// selection persists across sessions.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Stage {
+    #[default]
+    Drawing,
+    Meshing,
+}
+
 /// Persisted state for the 3D pipeline of a project. Mirrors the structure
-/// of the 2D `PageData` but lives behind the dimension toggle. Currently
-/// only the drawing-page state is populated; meshing/simulation will join
-/// in later steps.
+/// of the 2D `PageData` but lives behind the dimension toggle.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct State {
     #[serde(default)]
+    pub stage: Stage,
+    #[serde(default)]
     pub drawing: drawing::State,
+    #[serde(default)]
+    pub meshing: meshing::State,
 }

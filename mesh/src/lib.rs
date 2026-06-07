@@ -270,22 +270,12 @@ pub mod d2 {
     };
 }
 
-/// 3D pipeline — placeholder stubs. Tetrahedral meshing for the four
-/// primitive shapes (Cube, Cuboid, Sphere, Cylinder) lands in Step 3 of the
-/// refactor; this module exists so downstream code can already reference
-/// `mesh::d3::*` paths.
-pub mod d3 {
-    use nalgebra::Vector3;
-
-    /// 3D tetrahedral mesh — vertices plus 4-index tets. Step 3 fills in the
-    /// generation logic; for now this is a passive container.
-    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-    #[derive(Debug, Clone, Default)]
-    pub struct Mesh3D {
-        pub vertices: Vec<Vector3<f64>>,
-        pub tetrahedra: Vec<[usize; 4]>,
-    }
-}
+/// 3D pipeline — tetrahedral mesh generation for the primitive shapes.
+///
+/// Cuboid (and cube as a special case) uses a structured Nx*Ny*Nz grid with
+/// each voxel split into six tetrahedra. Cylinder and sphere meshers land
+/// in a follow-up commit; they share the same `Mesh3D` output type.
+pub mod d3;
 
 #[cfg(test)]
 mod tests {
