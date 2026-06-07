@@ -867,6 +867,14 @@ impl App {
                         let geometry = page_data.d3_state.drawing.geometry.clone();
                         d3::meshing::show(&mut page_data.d3_state.meshing, &geometry, ui);
                     }
+                    d3::Stage::Simulation => {
+                        let meshes = page_data.d3_state.meshing.meshes.clone();
+                        d3::simulation::show(
+                            &mut page_data.d3_state.simulation,
+                            &meshes,
+                            ui,
+                        );
+                    }
                 }
             }
         }
@@ -878,6 +886,7 @@ fn add_d3_stage_bar(stage: &mut d3::Stage, ui: &mut Ui) {
     ui.horizontal(|ui| {
         ui.selectable_value(stage, d3::Stage::Drawing, "Drawing");
         ui.selectable_value(stage, d3::Stage::Meshing, "Meshing");
+        ui.selectable_value(stage, d3::Stage::Simulation, "Simulation");
     });
     ui.separator();
 }

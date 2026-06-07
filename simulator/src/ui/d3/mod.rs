@@ -4,6 +4,7 @@
 
 pub mod drawing;
 pub mod meshing;
+pub mod simulation;
 
 use serde::{Deserialize, Serialize};
 
@@ -14,6 +15,7 @@ pub enum Stage {
     #[default]
     Drawing,
     Meshing,
+    Simulation,
 }
 
 /// Persisted state for the 3D pipeline of a project. Mirrors the structure
@@ -26,4 +28,6 @@ pub struct State {
     pub drawing: drawing::State,
     #[serde(default)]
     pub meshing: meshing::State,
+    #[serde(default)]
+    pub simulation: simulation::State,
 }
