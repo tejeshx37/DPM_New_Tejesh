@@ -3,6 +3,8 @@
 //! indices) so the DPM solver can consume both with parallel code paths.
 
 pub mod cuboid;
+pub mod cylinder;
+pub mod sphere;
 
 use nalgebra::Vector3;
 use serde::{Deserialize, Serialize};

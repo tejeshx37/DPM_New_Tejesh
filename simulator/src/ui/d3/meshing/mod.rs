@@ -3,7 +3,7 @@
 //! in the same orbit-camera viewport used by the drawing page.
 
 use egui::{Color32, ScrollArea, Sense, SidePanel, Slider, Stroke, Ui, Vec2};
-use mesh::d3::{cuboid, Mesh3D};
+use mesh::d3::{cuboid, cylinder, sphere, Mesh3D};
 use serde::{Deserialize, Serialize};
 
 use super::drawing::{
@@ -142,31 +142,30 @@ fn regenerate(state: &mut State, geometry: &Geometry3D) {
     state.meshes.clear();
     state.error = None;
     let n = state.subdivisions;
-    let mut unsupported = Vec::new();
-    for (idx, (shape, _op)) in geometry.shapes.iter().enumerate() {
-        match shape {
+    for (_idx, (shape, _op)) in geometry.shapes.iter().enumerate() {
+        let mesh = match shape {
             Shape3D::Cube { center, size } => {
                 let extents = nalgebra::Vector3::new(*size, *size, *size);
-                state.meshes.push(Some(cuboid::generate(*center, extents, n, n, n)));
+                cuboid::generate(*center, extents, n, n, n)
             }
             Shape3D::Cuboid { center, extents } => {
-                state.meshes.push(Some(cuboid::generate(*center, *extents, n, n, n)));
+                cuboid::generate(*center, *extents, n, n, n)
             }
-            other => {
-                unsupported.push((idx + 1, other.kind().label()));
-                state.meshes.push(None);
+            Shape3D::Sphere { center, radius } => sphere::generate(*center, *radius, n),
+            Shape3D::Cylinder {
+                base_center,
+                axis,
+                radius,
+                height,
+            } => {
+                // Circumferential resolution scales with the user's
+                // subdivisions setting so a single slider controls overall
+                // refinement. Clamp at 3 to keep the mesh closed.
+                let nt = (n * 4).max(3);
+                cylinder::generate(*base_center, *axis, *radius, *height, n, nt, n)
             }
-        }
-    }
-    if !unsupported.is_empty() {
-        let list = unsupported
-            .iter()
-            .map(|(i, k)| format!("#{i} {k}"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        state.error = Some(format!(
-            "Tet meshing not yet implemented for: {list}. Cube and Cuboid are supported in this milestone."
-        ));
+        };
+        state.meshes.push(Some(mesh));
     }
 }
 
