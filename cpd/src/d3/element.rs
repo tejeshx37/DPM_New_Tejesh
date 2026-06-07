@@ -52,7 +52,11 @@ impl Element3D {
     }
 
     /// Update strain and stress from the current node positions, using
-    /// the supplied material to evaluate the constitutive law.
+    /// the supplied material to evaluate the constitutive law. Uses the
+    /// Green-Lagrange strain tensor E = (F^T F − I) / 2 for parity with
+    /// the 2D solver (`green_lagrange_strain_tensor` in
+    /// `cpd/src/computer.rs`). Coincides with small-strain to leading
+    /// order; captures geometric nonlinearity for larger deformations.
     pub fn update_strain_stress(
         &mut self,
         positions: [Vector3<f32>; 4],
@@ -64,8 +68,7 @@ impl Element3D {
         let d = Matrix3::from_columns(&[d_ba, d_ca, d_da]);
         let f = d * self.ref_inv;
         let identity = Matrix3::identity();
-        // Small-strain symmetric tensor.
-        self.strain = (f + f.transpose()) * 0.5 - identity;
+        self.strain = (f.transpose() * f - identity) * 0.5;
         self.stress = material.eval_stress(&self.strain);
     }
 

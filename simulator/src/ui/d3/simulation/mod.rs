@@ -677,6 +677,66 @@ fn show_viewport(state: &mut State, meshes: &[Option<Mesh3D>], ui: &mut Ui) {
             }
         }
     }
+
+    // Color-bar legend, only meaningful when the heatmap is showing.
+    if state.computer.is_some() {
+        paint_color_bar(
+            &painter,
+            rect,
+            state.stats.min_von_mises,
+            state.stats.max_von_mises,
+        );
+    }
+}
+
+fn paint_color_bar(painter: &egui::Painter, rect: egui::Rect, vmin: f32, vmax: f32) {
+    let bar_w = 14.0;
+    let margin = 12.0;
+    let bar_h = (rect.height() - margin * 4.0).max(60.0);
+    let x = rect.right() - margin - bar_w;
+    let y_top = rect.top() + margin * 2.0;
+    let bar_rect = egui::Rect::from_min_size(
+        egui::pos2(x, y_top),
+        egui::vec2(bar_w, bar_h),
+    );
+
+    // Paint a stack of thin colored rectangles. 64 stops is smooth enough
+    // at this size without flooding the egui shape buffer.
+    const STOPS: usize = 64;
+    let stop_h = bar_h / STOPS as f32;
+    for i in 0..STOPS {
+        // Top of the bar = max stress (t=1), bottom = min (t=0).
+        let t = 1.0 - (i as f32 + 0.5) / STOPS as f32;
+        let color = heatmap(t);
+        let r = egui::Rect::from_min_size(
+            egui::pos2(x, y_top + i as f32 * stop_h),
+            egui::vec2(bar_w, stop_h + 0.5),
+        );
+        painter.rect_filled(r, 0.0, color);
+    }
+    painter.rect_stroke(bar_rect, 0.0, Stroke::new(1.0, Color32::from_gray(120)));
+
+    let font = egui::FontId::monospace(10.0);
+    let label_color = Color32::from_gray(220);
+    let label = |val: f32, y: f32| {
+        painter.text(
+            egui::pos2(x - 6.0, y),
+            egui::Align2::RIGHT_CENTER,
+            format!("{:.2e}", val),
+            font.clone(),
+            label_color,
+        );
+    };
+    label(vmax, y_top);
+    label((vmin + vmax) * 0.5, y_top + bar_h * 0.5);
+    label(vmin, y_top + bar_h);
+    painter.text(
+        egui::pos2(x + bar_w * 0.5, y_top - margin),
+        egui::Align2::CENTER_BOTTOM,
+        "Von Mises (Pa)",
+        font,
+        label_color,
+    );
 }
 
 fn vec3_f64(v: &Vector3<f32>) -> Vector3<f64> {
