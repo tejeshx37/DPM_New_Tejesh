@@ -18,7 +18,7 @@ mod material;
 mod node;
 
 pub use boundary_condition::{Axis, BoundaryCondition3D};
-pub use computer::{run_steps, Computer3D, StressStats};
+pub use computer::{run_steps, Computer3D, RegionAverages, StressStats};
 pub use config::Config3D;
 pub use element::Element3D;
 pub use material::IsotropicProps3D;

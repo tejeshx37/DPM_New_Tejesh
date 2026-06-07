@@ -24,6 +24,12 @@ pub struct StressStats {
     pub mean_von_mises: f32,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct RegionAverages {
+    pub mean_displacement: Vector3<f32>,
+    pub mean_force: Vector3<f32>,
+}
+
 impl Computer3D {
     /// Build a solver from a mesh. `vertices` are world-space reference
     /// positions; `tets` index into `vertices`. Each node's mass is the
@@ -172,6 +178,28 @@ impl Computer3D {
         });
 
         self.iterations += 1;
+    }
+
+    /// Mean displacement (current − initial) and mean force across a set of
+    /// node indices. Used by the simulator UI to record per-region time
+    /// series for plotting load-displacement curves.
+    pub fn region_averages(&self, indices: &[usize]) -> RegionAverages {
+        if indices.is_empty() {
+            return RegionAverages::default();
+        }
+        let mut disp = Vector3::<f32>::zeros();
+        let mut force = Vector3::<f32>::zeros();
+        for &i in indices {
+            if let Some(n) = self.nodes.get(i) {
+                disp += n.position - n.initial_position;
+                force += n.force;
+            }
+        }
+        let inv = 1.0 / indices.len() as f32;
+        RegionAverages {
+            mean_displacement: disp * inv,
+            mean_force: force * inv,
+        }
     }
 
     pub fn stress_stats(&self) -> StressStats {

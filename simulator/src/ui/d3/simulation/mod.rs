@@ -8,8 +8,11 @@
 
 use std::collections::HashMap;
 
-use cpd::d3::{Axis, BoundaryCondition3D, Computer3D, Config3D, IsotropicProps3D, StressStats};
-use egui::{Color32, ComboBox, DragValue, ScrollArea, Sense, SidePanel, Slider, Stroke, Ui, Vec2};
+use cpd::d3::{
+    Axis, BoundaryCondition3D, Computer3D, Config3D, IsotropicProps3D, RegionAverages, StressStats,
+};
+use egui::{Color32, ComboBox, DragValue, Sense, SidePanel, Slider, Stroke, TopBottomPanel, Ui, Vec2};
+use egui_plot::{Line, Plot, PlotPoints};
 use mesh::d3::Mesh3D;
 use nalgebra::Vector3;
 use serde::{Deserialize, Serialize};
@@ -44,6 +47,91 @@ pub struct State {
     /// Latest stress stats from the running solver.
     #[serde(skip)]
     pub stats: StressStats,
+    /// Time-series captured during simulation runs. Not persisted (the
+    /// solver itself isn't either); cleared on Reset / Rebuild.
+    #[serde(skip)]
+    pub history: History,
+    /// Plots panel visibility + tunables.
+    #[serde(default)]
+    pub plots: PlotConfig,
+}
+
+/// History buffer for time-series plotting. Capped at `MAX_SAMPLES` with
+/// drop-oldest behavior so long runs don't grow unbounded.
+#[derive(Debug, Default, Clone)]
+pub struct History {
+    pub stress: Vec<(f32, StressStats)>,
+    /// Per-region (mean_displacement, mean_force) over time. Key is the
+    /// boundary region name from the mesh.
+    pub regions: std::collections::HashMap<String, Vec<(f32, RegionAverages)>>,
+}
+
+const MAX_SAMPLES: usize = 5000;
+
+impl History {
+    pub fn clear(&mut self) {
+        self.stress.clear();
+        self.regions.clear();
+    }
+
+    fn push_stress(&mut self, t: f32, s: StressStats) {
+        self.stress.push((t, s));
+        if self.stress.len() > MAX_SAMPLES {
+            self.stress.drain(0..MAX_SAMPLES / 2);
+        }
+    }
+
+    fn push_region(&mut self, name: &str, t: f32, a: RegionAverages) {
+        let v = self.regions.entry(name.to_string()).or_default();
+        v.push((t, a));
+        if v.len() > MAX_SAMPLES {
+            v.drain(0..MAX_SAMPLES / 2);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlotConfig {
+    /// Show the plots panel below the viewport.
+    #[serde(default = "default_true")]
+    pub visible: bool,
+    /// How often to sample (every Nth solver step).
+    #[serde(default = "default_sample_stride")]
+    pub sample_stride: u32,
+    /// Which curves to draw.
+    #[serde(default = "default_true")]
+    pub show_vm_min: bool,
+    #[serde(default = "default_true")]
+    pub show_vm_mean: bool,
+    #[serde(default = "default_true")]
+    pub show_vm_max: bool,
+    /// Per-region displacement magnitude on the displacement plot.
+    #[serde(default = "default_true")]
+    pub show_region_displacement: bool,
+    /// Per-region force magnitude on the force plot.
+    #[serde(default = "default_true")]
+    pub show_region_force: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_sample_stride() -> u32 {
+    10
+}
+
+impl Default for PlotConfig {
+    fn default() -> Self {
+        Self {
+            visible: true,
+            sample_stride: default_sample_stride(),
+            show_vm_min: true,
+            show_vm_mean: true,
+            show_vm_max: true,
+            show_region_displacement: true,
+            show_region_force: true,
+        }
+    }
 }
 
 fn default_time_delta() -> f32 {
@@ -69,6 +157,8 @@ impl Default for State {
             viewport: ViewportState::default(),
             computer: None,
             stats: StressStats::default(),
+            history: History::default(),
+            plots: PlotConfig::default(),
         }
     }
 }
@@ -152,8 +242,30 @@ pub fn show(state: &mut State, meshes: &[Option<Mesh3D>], ui: &mut Ui) {
 
     if state.running {
         if let Some(c) = state.computer.as_mut() {
+            // Step one at a time so we can sample at the user's stride
+            // rather than just at frame boundaries (smoother curves).
             let steps = state.steps_per_frame as u64;
-            cpd::d3::run_steps(c, steps);
+            let stride = state.plots.sample_stride.max(1) as u64;
+            let active_mesh = meshes
+                .get(state.selected_mesh)
+                .and_then(|m| m.as_ref());
+            for _ in 0..steps {
+                c.step();
+                if c.iterations % stride == 0 {
+                    let t = c.time();
+                    let stats = c.stress_stats();
+                    state.history.push_stress(t, stats);
+                    if let Some(mesh) = active_mesh {
+                        for region in &mesh.boundary_faces.regions {
+                            let avg = c.region_averages(&region.vertices);
+                            state.history.push_region(&region.name, t, avg);
+                        }
+                    }
+                }
+                if c.time() >= state.duration {
+                    break;
+                }
+            }
             state.stats = c.stress_stats();
             if c.time() >= state.duration {
                 state.running = false;
@@ -162,6 +274,12 @@ pub fn show(state: &mut State, meshes: &[Option<Mesh3D>], ui: &mut Ui) {
         ui.ctx().request_repaint();
     }
 
+    if state.plots.visible {
+        TopBottomPanel::bottom("d3_sim_plots_panel")
+            .resizable(true)
+            .default_height(200.0)
+            .show_inside(ui, |ui| add_plots(state, ui));
+    }
     show_viewport(state, meshes, ui);
 }
 
@@ -304,12 +422,24 @@ fn add_run_controls(state: &mut State, mesh: &Mesh3D, ui: &mut Ui) {
             if let Some(c) = state.computer.as_mut() {
                 c.reset();
                 state.stats = StressStats::default();
+                state.history.clear();
             }
         }
         if ui.button("Rebuild").clicked() {
             state.running = false;
+            state.history.clear();
             rebuild_computer(state, mesh);
         }
+    });
+    ui.horizontal(|ui| {
+        ui.checkbox(&mut state.plots.visible, "Show plots");
+        ui.label("Sample every");
+        ui.add(
+            DragValue::new(&mut state.plots.sample_stride)
+                .speed(1.0)
+                .clamp_range(1..=1000u32),
+        );
+        ui.label("steps");
     });
 }
 
@@ -352,6 +482,122 @@ fn add_stats(state: &State, ui: &mut Ui) {
     } else {
         ui.label("Solver not built. Click Run to initialize.");
     }
+}
+
+fn add_plots(state: &mut State, ui: &mut Ui) {
+    ui.horizontal(|ui| {
+        ui.label("Plot curves:");
+        ui.checkbox(&mut state.plots.show_vm_min, "VM min");
+        ui.checkbox(&mut state.plots.show_vm_mean, "VM mean");
+        ui.checkbox(&mut state.plots.show_vm_max, "VM max");
+        ui.separator();
+        ui.checkbox(&mut state.plots.show_region_displacement, "Region |u|");
+        ui.checkbox(&mut state.plots.show_region_force, "Region |F|");
+    });
+    let total = ui.available_width().max(300.0);
+    let panel_w = (total / 3.0).max(150.0);
+    let panel_h = ui.available_height().max(120.0);
+
+    ui.horizontal(|ui| {
+        ui.allocate_ui(Vec2::new(panel_w, panel_h), |ui| {
+            ui.label("Von Mises stress (Pa)");
+            Plot::new("d3_vm_plot")
+                .height(panel_h - 20.0)
+                .show(ui, |plot_ui| {
+                    if state.plots.show_vm_min {
+                        plot_ui.line(
+                            Line::new(PlotPoints::from_iter(
+                                state.history.stress.iter().map(|(t, s)| [*t as f64, s.min_von_mises as f64]),
+                            ))
+                            .color(Color32::from_rgb(80, 140, 240))
+                            .name("min"),
+                        );
+                    }
+                    if state.plots.show_vm_mean {
+                        plot_ui.line(
+                            Line::new(PlotPoints::from_iter(
+                                state.history.stress.iter().map(|(t, s)| [*t as f64, s.mean_von_mises as f64]),
+                            ))
+                            .color(Color32::from_rgb(220, 220, 80))
+                            .name("mean"),
+                        );
+                    }
+                    if state.plots.show_vm_max {
+                        plot_ui.line(
+                            Line::new(PlotPoints::from_iter(
+                                state.history.stress.iter().map(|(t, s)| [*t as f64, s.max_von_mises as f64]),
+                            ))
+                            .color(Color32::from_rgb(240, 100, 100))
+                            .name("max"),
+                        );
+                    }
+                });
+        });
+        ui.allocate_ui(Vec2::new(panel_w, panel_h), |ui| {
+            ui.label("Region displacement magnitude (m)");
+            Plot::new("d3_disp_plot")
+                .height(panel_h - 20.0)
+                .show(ui, |plot_ui| {
+                    if !state.plots.show_region_displacement {
+                        return;
+                    }
+                    for (i, (name, series)) in sorted_regions(&state.history.regions).enumerate() {
+                        plot_ui.line(
+                            Line::new(PlotPoints::from_iter(
+                                series.iter().map(|(t, a)| {
+                                    [*t as f64, a.mean_displacement.norm() as f64]
+                                }),
+                            ))
+                            .color(region_color(i))
+                            .name(name),
+                        );
+                    }
+                });
+        });
+        ui.allocate_ui(Vec2::new(panel_w, panel_h), |ui| {
+            ui.label("Region force magnitude (N)");
+            Plot::new("d3_force_plot")
+                .height(panel_h - 20.0)
+                .show(ui, |plot_ui| {
+                    if !state.plots.show_region_force {
+                        return;
+                    }
+                    for (i, (name, series)) in sorted_regions(&state.history.regions).enumerate() {
+                        plot_ui.line(
+                            Line::new(PlotPoints::from_iter(
+                                series.iter().map(|(t, a)| {
+                                    [*t as f64, a.mean_force.norm() as f64]
+                                }),
+                            ))
+                            .color(region_color(i))
+                            .name(name),
+                        );
+                    }
+                });
+        });
+    });
+}
+
+fn sorted_regions(
+    regions: &std::collections::HashMap<String, Vec<(f32, RegionAverages)>>,
+) -> impl Iterator<Item = (&String, &Vec<(f32, RegionAverages)>)> {
+    let mut names: Vec<&String> = regions.keys().collect();
+    names.sort();
+    names.into_iter().map(move |n| (n, &regions[n]))
+}
+
+fn region_color(i: usize) -> Color32 {
+    const PALETTE: [Color32; 8] = [
+        Color32::from_rgb(120, 200, 255),
+        Color32::from_rgb(255, 140, 140),
+        Color32::from_rgb(150, 230, 150),
+        Color32::from_rgb(255, 200, 100),
+        Color32::from_rgb(200, 150, 255),
+        Color32::from_rgb(100, 220, 220),
+        Color32::from_rgb(255, 180, 220),
+        Color32::from_rgb(220, 220, 100),
+    ];
+    PALETTE[i % PALETTE.len()]
 }
 
 fn show_viewport(state: &mut State, meshes: &[Option<Mesh3D>], ui: &mut Ui) {
