@@ -27,6 +27,7 @@ fn main() -> eframe::Result<()> {
         NativeOptions {
             viewport: ViewportBuilder::default().with_app_id(APP_ID),
             persist_window: false,
+            renderer: eframe::Renderer::Wgpu,
             ..Default::default()
         },
         Box::new(|cc| Box::new(App::new(cc))),
