@@ -9,7 +9,8 @@
 use std::collections::HashMap;
 
 use cpd::d3::{
-    Axis, BoundaryCondition3D, Computer3D, Config3D, IsotropicProps3D, RegionAverages, StressStats,
+    Axis, BoundaryCondition3D, Computer3D, Config3D, FailureCriteria3D, IsotropicProps3D,
+    MaterialProps3D, OrthotropicProps3D, RegionAverages, StressStats,
 };
 use egui::{Color32, ComboBox, DragValue, Sense, SidePanel, Slider, Stroke, TopBottomPanel, Ui, Vec2};
 use egui_plot::{Line, Plot, PlotPoints};
@@ -32,7 +33,7 @@ pub struct State {
     #[serde(default)]
     pub region_bcs: HashMap<String, RegionBc>,
     #[serde(default)]
-    pub material: IsotropicProps3D,
+    pub material: MaterialProps3D,
     #[serde(default = "default_time_delta")]
     pub time_delta: f32,
     #[serde(default = "default_duration")]
@@ -151,7 +152,7 @@ impl Default for State {
         Self {
             selected_mesh: 0,
             region_bcs: HashMap::new(),
-            material: IsotropicProps3D::default(),
+            material: MaterialProps3D::default(),
             time_delta: default_time_delta(),
             duration: default_duration(),
             steps_per_frame: default_steps_per_frame(),
@@ -307,22 +308,113 @@ fn add_mesh_picker(state: &mut State, meshes: &[Option<Mesh3D>], ui: &mut Ui) {
 }
 
 fn add_material_controls(state: &mut State, ui: &mut Ui) {
-    let m = &mut state.material;
-    ui.horizontal(|ui| {
-        ui.label("Young's modulus (E)");
-        ui.add(DragValue::new(&mut m.elasticity_modulus).speed(1000.0).clamp_range(1.0..=f32::MAX));
-    });
-    ui.horizontal(|ui| {
-        ui.label("Poisson's ratio (ν)");
-        ui.add(DragValue::new(&mut m.poissons_ratio).speed(0.01).clamp_range(0.0..=0.49));
-    });
+    // Kind selector: swap between Isotropic and Orthotropic, preserving
+    // the bulk (density / damping / failure) section across the switch.
+    let current_kind = match state.material {
+        MaterialProps3D::Isotropic(_) => "Isotropic",
+        MaterialProps3D::Orthotropic(_) => "Orthotropic",
+    };
+    ComboBox::from_label("Kind")
+        .selected_text(current_kind)
+        .show_ui(ui, |ui| {
+            let mut iso_clicked = matches!(state.material, MaterialProps3D::Isotropic(_));
+            let mut ortho_clicked = matches!(state.material, MaterialProps3D::Orthotropic(_));
+            if ui.selectable_label(iso_clicked, "Isotropic").clicked() {
+                iso_clicked = true;
+            }
+            if ui.selectable_label(ortho_clicked, "Orthotropic").clicked() {
+                ortho_clicked = true;
+            }
+            if iso_clicked && !matches!(state.material, MaterialProps3D::Isotropic(_)) {
+                let bulk = state.material.bulk().clone();
+                state.material = MaterialProps3D::Isotropic(IsotropicProps3D {
+                    bulk,
+                    ..IsotropicProps3D::default()
+                });
+            }
+            if ortho_clicked && !matches!(state.material, MaterialProps3D::Orthotropic(_)) {
+                let bulk = state.material.bulk().clone();
+                state.material = MaterialProps3D::Orthotropic(OrthotropicProps3D {
+                    bulk,
+                    ..OrthotropicProps3D::default()
+                });
+            }
+        });
+
+    match &mut state.material {
+        MaterialProps3D::Isotropic(p) => add_isotropic_fields(p, ui),
+        MaterialProps3D::Orthotropic(p) => add_orthotropic_fields(p, ui),
+    }
+
+    ui.separator();
+    ui.label("Bulk");
+    let bulk = match &mut state.material {
+        MaterialProps3D::Isotropic(p) => &mut p.bulk,
+        MaterialProps3D::Orthotropic(p) => &mut p.bulk,
+    };
     ui.horizontal(|ui| {
         ui.label("Density (ρ)");
-        ui.add(DragValue::new(&mut m.density).speed(10.0).clamp_range(1e-6..=f32::MAX));
+        ui.add(DragValue::new(&mut bulk.density).speed(10.0).clamp_range(1e-6..=f32::MAX));
     });
     ui.horizontal(|ui| {
         ui.label("Damping (c)");
-        ui.add(DragValue::new(&mut m.damping).speed(0.1).clamp_range(0.0..=f32::MAX));
+        ui.add(DragValue::new(&mut bulk.damping).speed(0.1).clamp_range(0.0..=f32::MAX));
+    });
+
+    ui.collapsing("Failure criteria", |ui| {
+        add_failure_criteria_controls(&mut bulk.failure_criteria, ui);
+    });
+}
+
+fn add_isotropic_fields(p: &mut IsotropicProps3D, ui: &mut Ui) {
+    ui.horizontal(|ui| {
+        ui.label("Young's modulus (E)");
+        ui.add(DragValue::new(&mut p.elasticity_modulus).speed(1000.0).clamp_range(1.0..=f32::MAX));
+    });
+    ui.horizontal(|ui| {
+        ui.label("Poisson's ratio (ν)");
+        ui.add(DragValue::new(&mut p.poissons_ratio).speed(0.01).clamp_range(0.0..=0.49));
+    });
+}
+
+fn add_orthotropic_fields(p: &mut OrthotropicProps3D, ui: &mut Ui) {
+    ui.label("Young's moduli (E_x, E_y, E_z)");
+    ui.horizontal(|ui| {
+        ui.add(DragValue::new(&mut p.elasticity_modulus_x).speed(1000.0).clamp_range(1.0..=f32::MAX));
+        ui.add(DragValue::new(&mut p.elasticity_modulus_y).speed(1000.0).clamp_range(1.0..=f32::MAX));
+        ui.add(DragValue::new(&mut p.elasticity_modulus_z).speed(1000.0).clamp_range(1.0..=f32::MAX));
+    });
+    ui.label("Poisson's ratios (ν_xy, ν_xz, ν_yz)");
+    ui.horizontal(|ui| {
+        ui.add(DragValue::new(&mut p.poissons_ratio_xy).speed(0.01).clamp_range(0.0..=0.49));
+        ui.add(DragValue::new(&mut p.poissons_ratio_xz).speed(0.01).clamp_range(0.0..=0.49));
+        ui.add(DragValue::new(&mut p.poissons_ratio_yz).speed(0.01).clamp_range(0.0..=0.49));
+    });
+    ui.label("Shear moduli (G_xy, G_xz, G_yz)");
+    ui.horizontal(|ui| {
+        ui.add(DragValue::new(&mut p.shear_modulus_xy).speed(1000.0).clamp_range(1.0..=f32::MAX));
+        ui.add(DragValue::new(&mut p.shear_modulus_xz).speed(1000.0).clamp_range(1.0..=f32::MAX));
+        ui.add(DragValue::new(&mut p.shear_modulus_yz).speed(1000.0).clamp_range(1.0..=f32::MAX));
+    });
+}
+
+fn add_failure_criteria_controls(c: &mut FailureCriteria3D, ui: &mut Ui) {
+    optional_field(ui, "Strain energy density (W)", &mut c.strain_energy, 1.0, 0.0);
+    optional_field(ui, "Tensile principal stress", &mut c.tensional_stress, 1000.0, 0.0);
+    optional_field(ui, "Compressive principal stress", &mut c.compressional_stress, 1000.0, 0.0);
+}
+
+fn optional_field(ui: &mut Ui, label: &str, slot: &mut Option<f32>, speed: f32, min: f32) {
+    let mut enabled = slot.is_some();
+    ui.horizontal(|ui| {
+        ui.checkbox(&mut enabled, label);
+        if enabled {
+            let mut v = slot.unwrap_or(min.max(1.0));
+            ui.add(DragValue::new(&mut v).speed(speed).clamp_range(min..=f32::MAX));
+            *slot = Some(v);
+        } else {
+            *slot = None;
+        }
     });
 }
 

@@ -23,8 +23,16 @@ pub struct Element3D {
     pub ref_inv: Matrix3<f32>,
     /// Latest computed stress tensor (cached for visualization / reuse).
     pub stress: Matrix3<f32>,
-    /// Latest small-strain tensor.
+    /// Latest Green-Lagrange strain tensor.
     pub strain: Matrix3<f32>,
+    /// Strain-energy density at the latest step (W = ½ σ:ε). Used by
+    /// the failure criteria and exported for visualization.
+    #[serde(default)]
+    pub strain_energy: f32,
+    /// True once the element has tripped any of its material's failure
+    /// criteria. Broken elements stop contributing internal forces.
+    #[serde(default)]
+    pub is_broken: bool,
 }
 
 impl Element3D {
@@ -48,20 +56,29 @@ impl Element3D {
             ref_inv,
             stress: Matrix3::zeros(),
             strain: Matrix3::zeros(),
+            strain_energy: 0.0,
+            is_broken: false,
         })
     }
 
     /// Update strain and stress from the current node positions, using
     /// the supplied material to evaluate the constitutive law. Uses the
     /// Green-Lagrange strain tensor E = (F^T F − I) / 2 for parity with
-    /// the 2D solver (`green_lagrange_strain_tensor` in
-    /// `cpd/src/computer.rs`). Coincides with small-strain to leading
-    /// order; captures geometric nonlinearity for larger deformations.
+    /// the 2D solver. Coincides with small-strain to leading order;
+    /// captures geometric nonlinearity for larger deformations.
+    ///
+    /// After updating stress, evaluates the material's failure criteria
+    /// against the cached strain energy. Once `is_broken` becomes true,
+    /// the element's stress is left in place but
+    /// [`Element3D::nodal_forces`] returns zero forces.
     pub fn update_strain_stress(
         &mut self,
         positions: [Vector3<f32>; 4],
-        material: &super::IsotropicProps3D,
+        material: &super::MaterialProps3D,
     ) {
+        if self.is_broken {
+            return;
+        }
         let d_ba = positions[1] - positions[0];
         let d_ca = positions[2] - positions[0];
         let d_da = positions[3] - positions[0];
@@ -70,11 +87,32 @@ impl Element3D {
         let identity = Matrix3::identity();
         self.strain = (f.transpose() * f - identity) * 0.5;
         self.stress = material.eval_stress(&self.strain);
+
+        // Strain-energy density W = ½ σ:ε for a linear material.
+        self.strain_energy = 0.5
+            * (self.stress.m11 * self.strain.m11
+                + self.stress.m22 * self.strain.m22
+                + self.stress.m33 * self.strain.m33
+                + 2.0
+                    * (self.stress.m12 * self.strain.m12
+                        + self.stress.m13 * self.strain.m13
+                        + self.stress.m23 * self.strain.m23));
+
+        if material
+            .failure_criteria()
+            .satisfies(self.strain_energy, &self.stress)
+        {
+            self.is_broken = true;
+        }
     }
 
     /// Per-node internal forces produced by this element's current stress
     /// state. Returns `[f0, f1, f2, f3]` in the same order as `indices`.
+    /// Broken elements contribute no force.
     pub fn nodal_forces(&self) -> [Vector3<f32>; 4] {
+        if self.is_broken {
+            return [Vector3::zeros(); 4];
+        }
         // Shape function gradients for nodes 1..=3 are the columns of
         // (R^{-1})^T; node 0 is the negative sum.
         let bt = self.ref_inv.transpose();
