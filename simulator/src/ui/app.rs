@@ -858,11 +858,40 @@ impl App {
                 });
             }
             Dimension::D3 => {
-                d3::drawing::show(&mut page_data.d3_state.drawing, ui);
+                add_d3_stage_bar(&mut page_data.d3_state.stage, ui);
+                match page_data.d3_state.stage {
+                    d3::Stage::Drawing => {
+                        d3::drawing::show(&mut page_data.d3_state.drawing, ui);
+                    }
+                    d3::Stage::Meshing => {
+                        let geometry = page_data.d3_state.drawing.geometry.clone();
+                        d3::meshing::show(&mut page_data.d3_state.meshing, &geometry, ui);
+                    }
+                    d3::Stage::Simulation => {
+                        let meshes = page_data.d3_state.meshing.meshes.clone();
+                        d3::simulation::show(
+                            &mut page_data.d3_state.simulation,
+                            &meshes,
+                            ui,
+                        );
+                    }
+                }
             }
         }
     }
 
+}
+
+fn add_d3_stage_bar(stage: &mut d3::Stage, ui: &mut Ui) {
+    ui.horizontal(|ui| {
+        ui.selectable_value(stage, d3::Stage::Drawing, "Drawing");
+        ui.selectable_value(stage, d3::Stage::Meshing, "Meshing");
+        ui.selectable_value(stage, d3::Stage::Simulation, "Simulation");
+    });
+    ui.separator();
+}
+
+impl App {
     fn has_projects_to_show(&self) -> bool {
         self.project_manager.has_untitled_projects()
             || self.project_manager.has_open_projects()

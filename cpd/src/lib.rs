@@ -63,43 +63,10 @@ pub mod d2 {
     pub use crate::ExportData;
 }
 
-/// 3D pipeline — placeholder stubs. The DPM solver, materials, and boundary
-/// conditions for 3D land in Step 4 of the refactor; this module exists so
-/// downstream code can already reference `cpd::d3::*` paths.
-pub mod d3 {
-    use nalgebra::{Matrix3, Vector3};
-
-    /// 3D boundary condition. Mirrors the 2D variants but adds Z components.
-    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-    #[derive(Debug, Clone)]
-    pub enum BoundaryCondition3D {
-        Free,
-        // Future: Force(Vector3<Function>), Displacement(...)
-    }
-
-    /// 3D node — particle position, velocity, force.
-    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-    #[derive(Debug, Clone)]
-    pub struct Node3D {
-        pub position: Vector3<f32>,
-        pub velocity: Vector3<f32>,
-        pub force: Vector3<f32>,
-        pub mass: f32,
-    }
-
-    /// 3D particle stencil — a tetrahedron defined by four node indices.
-    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-    #[derive(Debug, Clone, Copy)]
-    pub struct Element3D {
-        pub indices: [usize; 4],
-    }
-
-    /// Placeholder 3D stress/strain accumulator. Step 4 fills this in.
-    #[derive(Debug, Clone, Default)]
-    pub struct Computer3D {
-        _stress: Option<Matrix3<f32>>,
-    }
-}
+/// 3D pipeline — DPM solver for tetrahedral particle stencils. Mirrors the
+/// 2D pipeline (`cpd::d2`) but operates on 4-node tets with `Matrix3`
+/// deformation gradients and `Vector3` BCs.
+pub mod d3;
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Getters)]

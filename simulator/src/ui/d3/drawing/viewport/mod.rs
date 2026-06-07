@@ -127,7 +127,7 @@ fn paint_world_axes(camera: &OrbitCamera, rect: egui::Rect, painter: &egui::Pain
 
 /// Project a world-space point to screen coordinates. Returns `None` if the
 /// point is behind the camera or outside reasonable clip space.
-fn project(view_proj: &Matrix4<f64>, rect: egui::Rect, p: Vector3<f64>) -> Option<Pos2> {
+pub fn project(view_proj: &Matrix4<f64>, rect: egui::Rect, p: Vector3<f64>) -> Option<Pos2> {
     let p4 = view_proj * nalgebra::Vector4::new(p.x, p.y, p.z, 1.0);
     if p4.w <= 1e-6 {
         return None;

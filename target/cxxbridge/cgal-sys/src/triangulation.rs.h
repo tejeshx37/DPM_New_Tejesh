@@ -1,1 +1,0 @@
-../../../debug/build/cgal-sys-54368ef573bb1145/out/cxxbridge/include/cgal-sys/src/triangulation.rs.h
