@@ -185,6 +185,20 @@ macro_rules! delete_project {
 impl App {
     pub fn new(cc: &CreationContext<'_>) -> Self {
         puffin::profile_function!();
+        // Register the shared wgpu scene renderer so 3D viewport paint
+        // callbacks can locate it via `egui_wgpu::CallbackResources`.
+        // Safe no-op if the wgpu backend isn't active (e.g. test contexts).
+        if let Some(render_state) = cc.wgpu_render_state.as_ref() {
+            let scene = d3::drawing::viewport::wgpu_scene::Scene::new(
+                &render_state.device,
+                render_state.target_format,
+            );
+            render_state
+                .renderer
+                .write()
+                .callback_resources
+                .insert(scene);
+        }
         cc.storage
             .and_then(|storage| eframe::get_value(storage, eframe::APP_KEY))
             .unwrap_or_default()
