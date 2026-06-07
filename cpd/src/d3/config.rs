@@ -2,11 +2,11 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::IsotropicProps3D;
+use super::MaterialProps3D;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Config3D {
-    pub material: IsotropicProps3D,
+    pub material: MaterialProps3D,
     pub time_delta_seconds: f32,
     pub duration_seconds: f32,
 }
@@ -14,7 +14,7 @@ pub struct Config3D {
 impl Default for Config3D {
     fn default() -> Self {
         Self {
-            material: IsotropicProps3D::default(),
+            material: MaterialProps3D::default(),
             // Conservative explicit step; users can tune for stability.
             time_delta_seconds: 1.0e-5,
             duration_seconds: 1.0e-2,

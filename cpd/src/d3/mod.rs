@@ -17,9 +17,11 @@ mod element;
 mod material;
 mod node;
 
-pub use boundary_condition::{Axis, BoundaryCondition3D};
+pub use boundary_condition::{Axis, AxisTimeSeries, BoundaryCondition3D, TimeSeries};
 pub use computer::{run_steps, Computer3D, RegionAverages, StressStats};
 pub use config::Config3D;
 pub use element::Element3D;
-pub use material::IsotropicProps3D;
+pub use material::{
+    BulkProps3D, FailureCriteria3D, IsotropicProps3D, MaterialProps3D, OrthotropicProps3D,
+};
 pub use node::Node3D;

@@ -58,7 +58,7 @@ impl Computer3D {
             .zip(node_volumes.iter())
             .map(|(pos, vol)| {
                 // Each tet shares its volume across 4 nodes.
-                let mass = config.material.density * vol * 0.25;
+                let mass = config.material.density() * vol * 0.25;
                 // Avoid zero-mass nodes that aren't part of any tet.
                 Node3D::new(*pos, mass.max(1e-12))
             })
@@ -89,7 +89,7 @@ impl Computer3D {
     pub fn step(&mut self) {
         let material = self.config.material;
         let dt = self.config.time_delta_seconds;
-        let damping = material.damping;
+        let damping = material.damping();
 
         // 1. Element strain/stress refresh.
         let node_positions: Vec<Vector3<f32>> = self.nodes.iter().map(|n| n.position).collect();
@@ -174,6 +174,26 @@ impl Computer3D {
                         n.velocity.z = 0.0;
                     }
                 }
+                BoundaryCondition3D::TimeForce { profile } => {
+                    n.force += profile.evaluate(t);
+                    integrate_free(n, damping, dt);
+                }
+                BoundaryCondition3D::TimeDisplacement { axes, profile } => {
+                    integrate_free(n, damping, dt);
+                    let target = profile.evaluate(t);
+                    if axes.x {
+                        n.position.x = n.initial_position.x + target.x;
+                        n.velocity.x = 0.0;
+                    }
+                    if axes.y {
+                        n.position.y = n.initial_position.y + target.y;
+                        n.velocity.y = 0.0;
+                    }
+                    if axes.z {
+                        n.position.z = n.initial_position.z + target.z;
+                        n.velocity.z = 0.0;
+                    }
+                }
             }
         });
 
@@ -232,6 +252,8 @@ impl Computer3D {
         for e in &mut self.elements {
             e.stress = Matrix3::zeros();
             e.strain = Matrix3::zeros();
+            e.strain_energy = 0.0;
+            e.is_broken = false;
         }
     }
 }
