@@ -1,0 +1,15 @@
+# clangd config for boost-sys source files.
+# When clangd opens files from the bundled Boost source tree, it needs to
+# find the full merged Boost headers. The built boost-headers directory
+# (produced by cargo build) contains all Boost libs merged into one flat
+# include tree, which is exactly what these source files expect at compile time.
+
+CompileFlags:
+  Add:
+    # Use the built merged Boost headers as the primary include path.
+    # This ensures that when clangd analyses files like literals.hpp it
+    # can resolve cross-library includes (value_pack, limb_type, etc.)
+    # that are only available after the full Boost header tree is assembled.
+    - -I/Users/mtejeshx37/DPM_New_Tejesh/target/debug/build/boost-sys-fc5028f5b3913140/out/boost-headers
+    - -I/Users/mtejeshx37/DPM_New_Tejesh/target/debug/build/gmp-mpfr-sys-8ce88ebb2fa7b4e0/out/include
+    - -std=c++20

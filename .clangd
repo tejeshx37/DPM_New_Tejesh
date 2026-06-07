@@ -1,0 +1,17 @@
+# clangd configuration for DPM_New_Tejesh
+# Provides include paths so the IDE language server can resolve CGAL, Boost, and GMP headers.
+# Note: cargo build manages these paths automatically at compile time;
+# this file is only for the IDE's C++ language server (clangd).
+
+CompileFlags:
+  Add:
+    # CGAL headers (bundled in the repo — stable path)
+    - -I/Users/mtejeshx37/DPM_New_Tejesh/cgal-sys/include
+    # Boost headers (built by boost-sys crate)
+    - -I/Users/mtejeshx37/DPM_New_Tejesh/target/debug/build/boost-sys-fc5028f5b3913140/out/boost-headers
+    # GMP/MPFR headers (built by gmp-mpfr-sys crate)
+    - -I/Users/mtejeshx37/DPM_New_Tejesh/target/debug/build/gmp-mpfr-sys-8ce88ebb2fa7b4e0/out/include
+    # CXX bridge generated headers
+    - -I/Users/mtejeshx37/DPM_New_Tejesh/target/debug/build/cgal-sys-54368ef573bb1145/out/cxxbridge/include
+    - -I/Users/mtejeshx37/DPM_New_Tejesh/target/debug/build/cgal-sys-54368ef573bb1145/out/cxxbridge/crate
+    - -std=c++20

@@ -34,3 +34,12 @@ inherits = "release"
 lto = "fat"
 codegen-units = 1
 strip = true
+
+# Workaround for macOS Sequoia/Sonoma icrate panic:
+# "invalid message send to ... countByEnumeratingWithState:objects:count:"
+# Disabling debug assertions bypasses strict type-encoding checks in older objc2/icrate versions.
+[profile.dev.package.objc2]
+debug-assertions = false
+
+[profile.dev.package.icrate]
+debug-assertions = false
