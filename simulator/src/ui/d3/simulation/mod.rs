@@ -18,7 +18,7 @@ use nalgebra::Vector3;
 use serde::{Deserialize, Serialize};
 
 use super::drawing::viewport::{
-    camera::OrbitCamera, scene_mesh, wgpu_scene, ViewportState,
+    camera::OrbitCamera, project, scene_mesh, wgpu_scene, ViewportState,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -686,6 +686,26 @@ fn show_viewport(state: &mut State, meshes: &[Option<Mesh3D>], ui: &mut Ui) {
         }
     }
 
+    // Boundary-condition overlay arrows / pinned markers, drawn on top
+    // of the wgpu scene as a 2D HUD. Uses solver positions when a Computer
+    // exists, otherwise the mesh's reference vertices.
+    if let Some(mesh) = active_mesh {
+        let positions: Option<Vec<Vector3<f64>>> = state.computer.as_ref().map(|c| {
+            c.nodes
+                .iter()
+                .map(|n| Vector3::new(n.position.x as f64, n.position.y as f64, n.position.z as f64))
+                .collect()
+        });
+        paint_bc_overlays(
+            &painter,
+            rect,
+            &view_proj,
+            &state.region_bcs,
+            mesh,
+            positions.as_deref(),
+        );
+    }
+
     // Color-bar legend, only meaningful when the heatmap is showing.
     if state.computer.is_some() {
         paint_color_bar(
@@ -693,6 +713,293 @@ fn show_viewport(state: &mut State, meshes: &[Option<Mesh3D>], ui: &mut Ui) {
             rect,
             state.stats.min_von_mises,
             state.stats.max_von_mises,
+        );
+    }
+}
+
+fn paint_bc_overlays(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    view_proj: &nalgebra::Matrix4<f64>,
+    region_bcs: &HashMap<String, RegionBc>,
+    mesh: &Mesh3D,
+    deformed_positions: Option<&[Vector3<f64>]>,
+) {
+    // Scene-size scale: use the AABB diagonal of the active vertex set so
+    // arrow lengths stay proportional to the mesh, not to physical force
+    // magnitudes (which vary wildly).
+    let vertex_pos = |i: usize| -> Vector3<f64> {
+        match deformed_positions {
+            Some(p) => p[i],
+            None => mesh.vertices[i],
+        }
+    };
+    let mut lo = Vector3::repeat(f64::INFINITY);
+    let mut hi = Vector3::repeat(f64::NEG_INFINITY);
+    for i in 0..mesh.vertices.len() {
+        let v = vertex_pos(i);
+        lo = lo.inf(&v);
+        hi = hi.sup(&v);
+    }
+    let scene_scale = (hi - lo).norm().max(1e-6);
+    let arrow_len_world = scene_scale * 0.18;
+
+    for region in &mesh.boundary_faces.regions {
+        let Some(bc) = region_bcs.get(&region.name) else {
+            continue;
+        };
+        if matches!(bc.kind, BcKind::Free) || region.vertices.is_empty() {
+            continue;
+        }
+
+        // Region centroid.
+        let mut centroid = Vector3::<f64>::zeros();
+        for &i in &region.vertices {
+            centroid += vertex_pos(i);
+        }
+        centroid /= region.vertices.len() as f64;
+
+        // Outward normal: sum of face normals (without normalizing each
+        // first) lets larger faces dominate, then normalize.
+        let mut normal = Vector3::<f64>::zeros();
+        for face in &region.faces {
+            let a = vertex_pos(face[0]);
+            let b = vertex_pos(face[1]);
+            let c = vertex_pos(face[2]);
+            normal += (b - a).cross(&(c - a));
+        }
+        if normal.norm() > 1e-12 {
+            normal = normal.normalize();
+        } else {
+            normal = Vector3::new(0.0, 1.0, 0.0);
+        }
+
+        // Anchor the arrow base just off the surface so it's not hidden
+        // by the mesh; tail offset = 5% of scene scale outward.
+        let base = centroid + normal * scene_scale * 0.02;
+
+        match bc.kind {
+            BcKind::Free => {}
+            BcKind::Pinned => {
+                draw_pinned_marker(
+                    painter,
+                    rect,
+                    view_proj,
+                    base,
+                    normal,
+                    bc.axes,
+                    scene_scale * 0.04,
+                );
+                draw_label(
+                    painter,
+                    rect,
+                    view_proj,
+                    base + normal * scene_scale * 0.05,
+                    &format!("{}: pinned {}", region.name, axes_label(bc.axes)),
+                    Color32::from_rgb(160, 200, 240),
+                );
+            }
+            BcKind::ConstantForce => {
+                let f = Vector3::new(bc.force[0] as f64, bc.force[1] as f64, bc.force[2] as f64);
+                let dir = if f.norm() > 1e-12 { f.normalize() } else { normal };
+                let tip = base + dir * arrow_len_world;
+                draw_arrow(
+                    painter,
+                    rect,
+                    view_proj,
+                    base,
+                    tip,
+                    Color32::from_rgb(255, 200, 100),
+                    2.0,
+                );
+                draw_label(
+                    painter,
+                    rect,
+                    view_proj,
+                    tip,
+                    &format!("{}: F |{:.2e}| N", region.name, f.norm()),
+                    Color32::from_rgb(255, 200, 100),
+                );
+            }
+            BcKind::ConstantDisplacement => {
+                let d = Vector3::new(
+                    bc.displacement[0] as f64,
+                    bc.displacement[1] as f64,
+                    bc.displacement[2] as f64,
+                );
+                let dir = if d.norm() > 1e-12 { d.normalize() } else { normal };
+                let tip = base + dir * arrow_len_world;
+                draw_arrow_dashed(
+                    painter,
+                    rect,
+                    view_proj,
+                    base,
+                    tip,
+                    Color32::from_rgb(160, 240, 160),
+                    2.0,
+                );
+                draw_label(
+                    painter,
+                    rect,
+                    view_proj,
+                    tip,
+                    &format!(
+                        "{}: u {} |{:.2e}|",
+                        region.name,
+                        axes_label(bc.axes),
+                        d.norm()
+                    ),
+                    Color32::from_rgb(160, 240, 160),
+                );
+            }
+        }
+    }
+}
+
+fn axes_label(axes: Axis) -> String {
+    let mut s = String::new();
+    if axes.x {
+        s.push('X');
+    }
+    if axes.y {
+        s.push('Y');
+    }
+    if axes.z {
+        s.push('Z');
+    }
+    if s.is_empty() {
+        "—".to_string()
+    } else {
+        s
+    }
+}
+
+fn draw_arrow(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    view_proj: &nalgebra::Matrix4<f64>,
+    base: Vector3<f64>,
+    tip: Vector3<f64>,
+    color: Color32,
+    width: f32,
+) {
+    let (Some(p0), Some(p1)) = (project(view_proj, rect, base), project(view_proj, rect, tip)) else {
+        return;
+    };
+    let stroke = Stroke::new(width, color);
+    painter.line_segment([p0, p1], stroke);
+    draw_arrowhead(painter, p0, p1, color, width);
+}
+
+fn draw_arrow_dashed(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    view_proj: &nalgebra::Matrix4<f64>,
+    base: Vector3<f64>,
+    tip: Vector3<f64>,
+    color: Color32,
+    width: f32,
+) {
+    let (Some(p0), Some(p1)) = (project(view_proj, rect, base), project(view_proj, rect, tip)) else {
+        return;
+    };
+    let dash_count = 6;
+    let stroke = Stroke::new(width, color);
+    for i in 0..dash_count {
+        if i % 2 == 1 {
+            continue;
+        }
+        let t0 = i as f32 / dash_count as f32;
+        let t1 = (i + 1) as f32 / dash_count as f32;
+        let a = egui::pos2(p0.x + (p1.x - p0.x) * t0, p0.y + (p1.y - p0.y) * t0);
+        let b = egui::pos2(p0.x + (p1.x - p0.x) * t1, p0.y + (p1.y - p0.y) * t1);
+        painter.line_segment([a, b], stroke);
+    }
+    draw_arrowhead(painter, p0, p1, color, width);
+}
+
+fn draw_arrowhead(
+    painter: &egui::Painter,
+    base: egui::Pos2,
+    tip: egui::Pos2,
+    color: Color32,
+    width: f32,
+) {
+    let dx = tip.x - base.x;
+    let dy = tip.y - base.y;
+    let len = (dx * dx + dy * dy).sqrt().max(1e-3);
+    let ux = dx / len;
+    let uy = dy / len;
+    let head = 9.0_f32.min(len * 0.4);
+    // Perpendicular for the wings.
+    let px = -uy;
+    let py = ux;
+    let a = egui::pos2(
+        tip.x - ux * head + px * head * 0.5,
+        tip.y - uy * head + py * head * 0.5,
+    );
+    let b = egui::pos2(
+        tip.x - ux * head - px * head * 0.5,
+        tip.y - uy * head - py * head * 0.5,
+    );
+    let stroke = Stroke::new(width, color);
+    painter.line_segment([tip, a], stroke);
+    painter.line_segment([tip, b], stroke);
+}
+
+fn draw_pinned_marker(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    view_proj: &nalgebra::Matrix4<f64>,
+    center: Vector3<f64>,
+    normal: Vector3<f64>,
+    axes: Axis,
+    world_size: f64,
+) {
+    // Render as three short bars pointing along each axis the constraint
+    // covers. A bar means "this axis is locked"; missing bar means free.
+    let bars = [
+        (axes.x, Vector3::new(1.0, 0.0, 0.0), Color32::from_rgb(240, 110, 110)),
+        (axes.y, Vector3::new(0.0, 1.0, 0.0), Color32::from_rgb(110, 220, 110)),
+        (axes.z, Vector3::new(0.0, 0.0, 1.0), Color32::from_rgb(110, 160, 250)),
+    ];
+    for (on, dir, color) in bars {
+        if !on {
+            continue;
+        }
+        let a = center - dir * world_size * 0.5;
+        let b = center + dir * world_size * 0.5;
+        if let (Some(pa), Some(pb)) = (project(view_proj, rect, a), project(view_proj, rect, b)) {
+            painter.line_segment([pa, pb], Stroke::new(2.5, color));
+        }
+    }
+    // Also draw a small ring oriented along the surface normal to indicate
+    // the anchor point.
+    let _ = normal;
+    if let Some(p) = project(view_proj, rect, center) {
+        painter.circle_stroke(
+            p,
+            4.0,
+            Stroke::new(1.2, Color32::from_rgb(200, 220, 240)),
+        );
+    }
+}
+
+fn draw_label(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    view_proj: &nalgebra::Matrix4<f64>,
+    anchor: Vector3<f64>,
+    text: &str,
+    color: Color32,
+) {
+    if let Some(p) = project(view_proj, rect, anchor) {
+        painter.text(
+            p + egui::vec2(6.0, -6.0),
+            egui::Align2::LEFT_BOTTOM,
+            text,
+            egui::FontId::monospace(10.0),
+            color,
         );
     }
 }
