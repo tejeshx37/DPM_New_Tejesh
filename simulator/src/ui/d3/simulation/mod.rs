@@ -27,10 +27,11 @@ use super::drawing::viewport::{
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct State {
-    /// Index into the meshing state's `meshes` Vec selecting which mesh to
-    /// simulate. Single-mesh for this milestone; multi-body scenes are a
-    /// future iteration.
+    /// Legacy field from the single-mesh era — kept so old `.simproj`
+    /// files still deserialize. Multi-body scenes (B11) now always
+    /// combine every populated mesh in the scene into a single solver.
     #[serde(default)]
+    #[allow(dead_code)]
     pub selected_mesh: usize,
     /// Per-region BC choice, keyed by region name (e.g. "x_min").
     #[serde(default)]
@@ -278,27 +279,35 @@ impl RegionBc {
     }
 }
 
+/// Stitch together every populated mesh in the scene into a single
+/// `Mesh3D` so the solver sees one combined system (B11). Returns
+/// `None` if no mesh is available.
+fn combine_active(meshes: &[Option<Mesh3D>]) -> Option<Mesh3D> {
+    let refs: Vec<&Mesh3D> = meshes.iter().filter_map(|m| m.as_ref()).collect();
+    if refs.is_empty() {
+        None
+    } else {
+        Some(Mesh3D::combine(&refs))
+    }
+}
+
 pub fn show(state: &mut State, meshes: &[Option<Mesh3D>], ui: &mut Ui) {
+    let combined = combine_active(meshes);
     SidePanel::right("d3_sim_side_panel")
         .resizable(true)
         .default_width(300.0)
         .show_inside(ui, |ui| {
             ui.heading("3D Simulation");
             ui.separator();
-            add_mesh_picker(state, meshes, ui);
+            add_mesh_summary(meshes, &combined, ui);
 
-            let active_mesh = meshes
-                .get(state.selected_mesh)
-                .and_then(|m| m.as_ref());
-
-            if active_mesh.is_none() {
+            let Some(mesh) = combined.as_ref() else {
                 ui.colored_label(
                     Color32::YELLOW,
                     "No mesh available. Generate one on the Meshing page first.",
                 );
                 return;
-            }
-            let mesh = active_mesh.unwrap();
+            };
 
             ui.collapsing("Material", |ui| add_material_controls(state, ui));
             ui.collapsing("Integration", |ui| add_integration_controls(state, ui));
@@ -318,9 +327,7 @@ pub fn show(state: &mut State, meshes: &[Option<Mesh3D>], ui: &mut Ui) {
             // rather than just at frame boundaries (smoother curves).
             let steps = state.steps_per_frame as u64;
             let stride = state.plots.sample_stride.max(1) as u64;
-            let active_mesh = meshes
-                .get(state.selected_mesh)
-                .and_then(|m| m.as_ref());
+            let active_mesh = combined.as_ref();
             for _ in 0..steps {
                 c.step();
                 if c.iterations % stride == 0 {
@@ -366,28 +373,24 @@ pub fn show(state: &mut State, meshes: &[Option<Mesh3D>], ui: &mut Ui) {
             .default_height(200.0)
             .show_inside(ui, |ui| add_plots(state, ui));
     }
-    show_viewport(state, meshes, ui);
+    show_viewport(state, combined.as_ref(), ui);
 }
 
-fn add_mesh_picker(state: &mut State, meshes: &[Option<Mesh3D>], ui: &mut Ui) {
-    let available: Vec<usize> = meshes
-        .iter()
-        .enumerate()
-        .filter_map(|(i, m)| m.as_ref().map(|_| i))
-        .collect();
-    if available.is_empty() {
-        return;
-    }
-    if !available.contains(&state.selected_mesh) {
-        state.selected_mesh = available[0];
-    }
-    ComboBox::from_label("Mesh to simulate")
-        .selected_text(format!("Mesh #{}", state.selected_mesh + 1))
-        .show_ui(ui, |ui| {
-            for i in &available {
-                ui.selectable_value(&mut state.selected_mesh, *i, format!("Mesh #{}", i + 1));
-            }
-        });
+fn add_mesh_summary(meshes: &[Option<Mesh3D>], combined: &Option<Mesh3D>, ui: &mut Ui) {
+    let body_count = meshes.iter().filter(|m| m.is_some()).count();
+    let (verts, tets) = combined
+        .as_ref()
+        .map(|m| (m.vertex_count(), m.tet_count()))
+        .unwrap_or((0, 0));
+    ui.horizontal(|ui| {
+        ui.label(format!(
+            "{} bod{} combined → {} verts, {} tets",
+            body_count,
+            if body_count == 1 { "y" } else { "ies" },
+            verts,
+            tets
+        ));
+    });
 }
 
 fn add_material_controls(state: &mut State, ui: &mut Ui) {
@@ -924,27 +927,24 @@ fn region_color(i: usize) -> Color32 {
     PALETTE[i % PALETTE.len()]
 }
 
-fn show_viewport(state: &mut State, meshes: &[Option<Mesh3D>], ui: &mut Ui) {
+fn show_viewport(state: &mut State, active_mesh: Option<&Mesh3D>, ui: &mut Ui) {
     let available = ui.available_size();
     let size = Vec2::new(available.x.max(100.0), available.y.max(100.0));
     let (response, painter) = ui.allocate_painter(size, Sense::click_and_drag());
     let rect = response.rect;
 
     // Auto-frame on first render.
-    let aabb = meshes
-        .get(state.selected_mesh)
-        .and_then(|m| m.as_ref())
-        .map(|m| {
-            let lo = m
-                .vertices
-                .iter()
-                .fold(Vector3::repeat(f64::INFINITY), |acc, v| acc.inf(v));
-            let hi = m
-                .vertices
-                .iter()
-                .fold(Vector3::repeat(f64::NEG_INFINITY), |acc, v| acc.sup(v));
-            (lo, hi)
-        });
+    let aabb = active_mesh.map(|m| {
+        let lo = m
+            .vertices
+            .iter()
+            .fold(Vector3::repeat(f64::INFINITY), |acc, v| acc.inf(v));
+        let hi = m
+            .vertices
+            .iter()
+            .fold(Vector3::repeat(f64::NEG_INFINITY), |acc, v| acc.sup(v));
+        (lo, hi)
+    });
 
     if state.viewport.auto_frame {
         if let Some((lo, hi)) = aabb {
@@ -965,7 +965,6 @@ fn show_viewport(state: &mut State, meshes: &[Option<Mesh3D>], ui: &mut Ui) {
     // If we have a running computer, draw the deformed mesh surface
     // colored by Von Mises stress averaged over each vertex's incident
     // tets. Otherwise show the reference mesh's surface in solid grey.
-    let active_mesh = meshes.get(state.selected_mesh).and_then(|m| m.as_ref());
     if let (Some(c), Some(mesh)) = (state.computer.as_ref(), active_mesh) {
         let s_min = state.stats.min_von_mises;
         let s_max = state.stats.max_von_mises.max(s_min + 1e-12);
