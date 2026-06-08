@@ -23,3 +23,6 @@ serde = [
     "nalgebra/serde-serialize",
     "function/serde",
 ]
+
+[dev-dependencies]
+serde_json = "1.0"

@@ -337,4 +337,84 @@ mod tests {
         c.step();
         assert!(c.elements[0].stress.m11 > 0.0);
     }
+
+    /// D17: a paused 3D simulation must survive a serde round-trip and
+    /// continue producing the same trajectory as one that never paused.
+    /// Steps a small mesh, freezes the state to JSON mid-run, thaws into
+    /// a new `Computer3D`, runs the remaining steps, and compares
+    /// final node positions and element stresses against a reference
+    /// run with the same total step count.
+    #[test]
+    fn serde_roundtrip_resumes_same_trajectory() {
+        // 8-vertex unit cuboid as two stacked tets is enough state to
+        // exercise the BC + force-assembly paths beyond a single tet.
+        let v = vec![
+            Vector3::new(0.0, 0.0, 0.0),
+            Vector3::new(1.0, 0.0, 0.0),
+            Vector3::new(0.0, 1.0, 0.0),
+            Vector3::new(0.0, 0.0, 1.0),
+            Vector3::new(1.0, 1.0, 1.0),
+        ];
+        let t = vec![[0, 1, 2, 3], [1, 2, 3, 4]];
+        let mut cfg = Config3D::default();
+        cfg.time_delta_seconds = 1.0e-4;
+        cfg.duration_seconds = 1.0;
+
+        // Reference: a single uninterrupted run.
+        let mut reference = Computer3D::from_mesh(&v, &t, cfg).unwrap();
+        // Pin node 0 fully; push node 4 with a constant force so something
+        // actually evolves.
+        reference.set_bc(
+            &[0],
+            BoundaryCondition3D::Pinned {
+                axes: crate::d3::Axis::ALL,
+            },
+        );
+        reference.set_bc(
+            &[4],
+            BoundaryCondition3D::ConstantForce {
+                force: [1.0e3, 0.0, 0.0],
+            },
+        );
+        run_steps(&mut reference, 200);
+
+        // Round-trip: same setup, run half, serde-bounce, run the rest.
+        let mut bounced = Computer3D::from_mesh(&v, &t, cfg).unwrap();
+        bounced.set_bc(
+            &[0],
+            BoundaryCondition3D::Pinned {
+                axes: crate::d3::Axis::ALL,
+            },
+        );
+        bounced.set_bc(
+            &[4],
+            BoundaryCondition3D::ConstantForce {
+                force: [1.0e3, 0.0, 0.0],
+            },
+        );
+        run_steps(&mut bounced, 100);
+        let json = serde_json::to_string(&bounced).expect("serialize Computer3D");
+        let mut thawed: Computer3D = serde_json::from_str(&json).expect("deserialize Computer3D");
+        run_steps(&mut thawed, 100);
+
+        assert_eq!(reference.iterations, thawed.iterations);
+        // Positions and stresses should match to within rounding (we use
+        // f32 internally; bounded by a tolerance well above noise).
+        for (a, b) in reference.nodes.iter().zip(thawed.nodes.iter()) {
+            assert!(
+                (a.position - b.position).norm() < 1e-4,
+                "position mismatch: {:?} vs {:?}",
+                a.position,
+                b.position
+            );
+        }
+        for (a, b) in reference.elements.iter().zip(thawed.elements.iter()) {
+            assert!(
+                (a.stress - b.stress).norm() < 1.0,
+                "stress mismatch:\n{}\nvs\n{}",
+                a.stress,
+                b.stress
+            );
+        }
+    }
 }

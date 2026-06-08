@@ -7,6 +7,7 @@
 //! mesh with per-tet edges colored by Von Mises stress.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use cpd::d3::{
     Axis, AxisTimeSeries, BoundaryCondition3D, Computer3D, Config3D, FailureCriteria3D,
@@ -17,6 +18,8 @@ use egui_plot::{Line, Plot, PlotPoints};
 use mesh::d3::Mesh3D;
 use nalgebra::Vector3;
 use serde::{Deserialize, Serialize};
+
+pub mod export;
 
 use super::drawing::viewport::{
     camera::OrbitCamera, project, scene_mesh, wgpu_scene, ViewportState,
@@ -44,15 +47,16 @@ pub struct State {
     pub running: bool,
     #[serde(default)]
     pub viewport: ViewportState,
-    /// Live solver state. Not persisted; rebuilt on demand.
-    #[serde(skip)]
+    /// Live solver state. Persisted across sessions (D16) so a paused
+    /// simulation resumes mid-run on reopen; defaulted on first load.
+    #[serde(default)]
     pub computer: Option<Computer3D>,
     /// Latest stress stats from the running solver.
-    #[serde(skip)]
+    #[serde(default)]
     pub stats: StressStats,
-    /// Time-series captured during simulation runs. Not persisted (the
-    /// solver itself isn't either); cleared on Reset / Rebuild.
-    #[serde(skip)]
+    /// Time-series captured during simulation runs (cleared on Reset /
+    /// Rebuild). Persisted alongside the solver.
+    #[serde(default)]
     pub history: History,
     /// Plots panel visibility + tunables.
     #[serde(default)]
@@ -61,6 +65,13 @@ pub struct State {
     /// the UI for ergonomics; converted to 0-based when accessed.
     #[serde(default)]
     pub inspect: InspectConfig,
+    /// Last directory the user exported CSV into (B10). Used as the
+    /// default for the next export so they don't pick repeatedly.
+    #[serde(default)]
+    pub last_export_dir: Option<PathBuf>,
+    /// Last export status message (#files written or error string).
+    #[serde(skip)]
+    pub last_export_status: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -74,8 +85,9 @@ pub struct InspectConfig {
 }
 
 /// History buffer for time-series plotting. Capped at `MAX_SAMPLES` with
-/// drop-oldest behavior so long runs don't grow unbounded.
-#[derive(Debug, Default, Clone)]
+/// drop-oldest behavior so long runs don't grow unbounded. Serializable
+/// so a paused simulation can be saved and resumed across sessions (D16).
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct History {
     pub stress: Vec<(f32, StressStats)>,
     /// Per-region (mean_displacement, mean_force) over time. Key is the
@@ -201,6 +213,8 @@ impl Default for State {
             history: History::default(),
             plots: PlotConfig::default(),
             inspect: InspectConfig::default(),
+            last_export_dir: None,
+            last_export_status: None,
         }
     }
 }
@@ -677,6 +691,27 @@ fn add_run_controls(state: &mut State, mesh: &Mesh3D, ui: &mut Ui) {
                 .clamp_range(1..=1000u32),
         );
         ui.label("steps");
+    });
+    ui.horizontal(|ui| {
+        if ui.button("Export CSV…").clicked() {
+            let start = state
+                .last_export_dir
+                .clone()
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+            if let Some(dir) = rfd::FileDialog::new().set_directory(start).pick_folder() {
+                let report = export::export(state, Some(mesh), &dir);
+                if let Some(err) = report.error {
+                    state.last_export_status = Some(format!("Export failed: {err}"));
+                } else {
+                    state.last_export_status =
+                        Some(format!("Wrote {} files to {}", report.files.len(), dir.display()));
+                    state.last_export_dir = Some(dir);
+                }
+            }
+        }
+        if let Some(msg) = state.last_export_status.as_deref() {
+            ui.label(msg);
+        }
     });
 }
 
