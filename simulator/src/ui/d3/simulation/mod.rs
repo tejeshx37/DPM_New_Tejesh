@@ -282,7 +282,7 @@ impl RegionBc {
 /// Stitch together every populated mesh in the scene into a single
 /// `Mesh3D` so the solver sees one combined system (B11). Returns
 /// `None` if no mesh is available.
-fn combine_active(meshes: &[Option<Mesh3D>]) -> Option<Mesh3D> {
+pub fn combine_active(meshes: &[Option<Mesh3D>]) -> Option<Mesh3D> {
     let refs: Vec<&Mesh3D> = meshes.iter().filter_map(|m| m.as_ref()).collect();
     if refs.is_empty() {
         None
@@ -311,9 +311,7 @@ pub fn show(state: &mut State, meshes: &[Option<Mesh3D>], ui: &mut Ui) {
 
             ui.collapsing("Material", |ui| add_material_controls(state, ui));
             ui.collapsing("Integration", |ui| add_integration_controls(state, ui));
-            ui.collapsing("Boundary Conditions", |ui| {
-                add_bc_controls(state, mesh, ui)
-            });
+            ui.label("Boundary conditions are set on the Boundary Conditions page.");
             ui.collapsing("Inspect", |ui| add_inspect_controls(state, ui));
 
             ui.separator();
@@ -525,7 +523,7 @@ fn add_integration_controls(state: &mut State, ui: &mut Ui) {
     });
 }
 
-fn add_bc_controls(state: &mut State, mesh: &Mesh3D, ui: &mut Ui) {
+pub fn add_bc_controls(state: &mut State, mesh: &Mesh3D, ui: &mut Ui) {
     for region in &mesh.boundary_faces.regions {
         let entry = state.region_bcs.entry(region.name.clone()).or_default();
         ui.group(|ui| {
@@ -927,7 +925,7 @@ fn region_color(i: usize) -> Color32 {
     PALETTE[i % PALETTE.len()]
 }
 
-fn show_viewport(state: &mut State, active_mesh: Option<&Mesh3D>, ui: &mut Ui) {
+pub fn show_viewport(state: &mut State, active_mesh: Option<&Mesh3D>, ui: &mut Ui) {
     let available = ui.available_size();
     let size = Vec2::new(available.x.max(100.0), available.y.max(100.0));
     let (response, painter) = ui.allocate_painter(size, Sense::click_and_drag());
