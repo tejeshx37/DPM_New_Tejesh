@@ -381,8 +381,15 @@ pub fn show(state: &mut State, meshes: &[Option<Mesh3D>], ui: &mut Ui) {
                             c.assemble_forces_and_integrate();
                         }
                         Err(e) => {
-                            state.gpu_status =
-                                Some(format!("GPU compute failed: {e} — falling back to CPU"));
+                            // Persistent runtime failure: drop the kernel
+                            // and turn the toggle off so we don't re-fail
+                            // every frame. User can re-enable explicitly
+                            // after addressing the cause.
+                            state.gpu_status = Some(format!(
+                                "GPU compute failed: {e} — GPU disabled, using CPU"
+                            ));
+                            state.gpu_kernel = None;
+                            state.use_gpu_stresses = false;
                             gpu_active = false;
                             c.step();
                         }
@@ -591,7 +598,12 @@ fn add_integration_controls(state: &mut State, ui: &mut Ui) {
         );
         if !supports_gpu {
             state.use_gpu_stresses = false;
-            ui.label("(isotropic only for now)");
+            let reason = if !matches!(state.material, MaterialProps3D::Isotropic(_)) {
+                "(isotropic only for now)"
+            } else {
+                "(disabled while failure criteria are configured)"
+            };
+            ui.label(reason);
         }
     });
     if state.use_gpu_stresses {

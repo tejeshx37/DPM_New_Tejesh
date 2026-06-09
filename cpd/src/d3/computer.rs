@@ -112,10 +112,20 @@ impl Computer3D {
     /// Overwrite per-element stresses from an external buffer (e.g. a
     /// GPU compute kernel). Bypasses CPU stress evaluation entirely;
     /// `strain_energy` and `is_broken` are not updated, so failure
-    /// criteria are inert under this path. Caller is responsible for
-    /// supplying one stress per element in the same order as
-    /// `self.elements`.
+    /// criteria are inert under this path.
+    ///
+    /// Panics if `stresses.len() != self.elements.len()` — partial
+    /// updates would leave a mix of fresh and stale stresses, which is
+    /// silently wrong rather than loudly wrong. Callers must supply one
+    /// stress per element in the same order as `self.elements`.
     pub fn apply_external_stresses(&mut self, stresses: &[Matrix3<f32>]) {
+        assert_eq!(
+            stresses.len(),
+            self.elements.len(),
+            "apply_external_stresses: expected {} stresses (one per element), got {}",
+            self.elements.len(),
+            stresses.len(),
+        );
         for (e, s) in self.elements.iter_mut().zip(stresses.iter()) {
             e.stress = *s;
         }
@@ -436,5 +446,15 @@ mod tests {
                 b.stress
             );
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "apply_external_stresses")]
+    fn apply_external_stresses_rejects_wrong_length() {
+        let (v, t) = single_tet_mesh();
+        let mut c = Computer3D::from_mesh(&v, &t, Config3D::default()).unwrap();
+        // Mesh has 1 element; supplying 0 stresses should panic loudly
+        // rather than silently leave the lone element with a stale value.
+        c.apply_external_stresses(&[]);
     }
 }
