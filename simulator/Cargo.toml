@@ -15,6 +15,7 @@ eframe = { version = "0.27.2", default-features = false, features = [
 egui-wgpu = "0.27.2"
 wgpu = "0.19"
 bytemuck = { version = "1.16", features = ["derive"] }
+pollster = "0.3"
 egui = { version = "0.27.2", features = ["rayon", "log"] }
 egui_plot = "0.27.2"
 egui_extras = { version = "0.27.2", features = ["svg"] }

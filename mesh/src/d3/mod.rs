@@ -44,4 +44,82 @@ impl Mesh3D {
     pub fn tet_count(&self) -> usize {
         self.tetrahedra.len()
     }
+
+    /// Stitch multiple meshes into one. Vertex and tet indices are
+    /// offset so the merged mesh references its own flat arrays;
+    /// boundary regions are renamed `"<prefix>{idx}/{region}"` so the
+    /// simulator can address each source mesh's boundaries independently
+    /// after combination (B11 — multi-body 3D scenes).
+    pub fn combine(meshes: &[&Mesh3D]) -> Mesh3D {
+        let mut out = Mesh3D::default();
+        for (i, m) in meshes.iter().enumerate() {
+            let v_offset = out.vertices.len();
+            out.vertices.extend(m.vertices.iter().copied());
+            for tet in &m.tetrahedra {
+                out.tetrahedra
+                    .push([tet[0] + v_offset, tet[1] + v_offset, tet[2] + v_offset, tet[3] + v_offset]);
+            }
+            for region in &m.boundary_faces.regions {
+                let faces: Vec<[usize; 3]> = region
+                    .faces
+                    .iter()
+                    .map(|f| [f[0] + v_offset, f[1] + v_offset, f[2] + v_offset])
+                    .collect();
+                let vertices: Vec<usize> =
+                    region.vertices.iter().map(|v| v + v_offset).collect();
+                out.boundary_faces.regions.push(BoundaryRegion {
+                    name: format!("body{}/{}", i + 1, region.name),
+                    faces,
+                    vertices,
+                });
+            }
+        }
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unit_cube_with_one_tet() -> Mesh3D {
+        Mesh3D {
+            vertices: vec![
+                Vector3::new(0.0, 0.0, 0.0),
+                Vector3::new(1.0, 0.0, 0.0),
+                Vector3::new(0.0, 1.0, 0.0),
+                Vector3::new(0.0, 0.0, 1.0),
+            ],
+            tetrahedra: vec![[0, 1, 2, 3]],
+            boundary_faces: BoundaryFaces {
+                regions: vec![BoundaryRegion {
+                    name: "all".to_string(),
+                    faces: vec![[0, 1, 2], [0, 2, 3]],
+                    vertices: vec![0, 1, 2, 3],
+                }],
+            },
+        }
+    }
+
+    #[test]
+    fn combine_offsets_indices_and_renames_regions() {
+        let a = unit_cube_with_one_tet();
+        let b = unit_cube_with_one_tet();
+        let m = Mesh3D::combine(&[&a, &b]);
+
+        assert_eq!(m.vertices.len(), 8);
+        assert_eq!(m.tetrahedra.len(), 2);
+        // First tet keeps its 0..4 indices; second is offset to 4..8.
+        assert_eq!(m.tetrahedra[0], [0, 1, 2, 3]);
+        assert_eq!(m.tetrahedra[1], [4, 5, 6, 7]);
+
+        let names: Vec<&str> = m
+            .boundary_faces
+            .regions
+            .iter()
+            .map(|r| r.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["body1/all", "body2/all"]);
+        assert_eq!(m.boundary_faces.regions[1].vertices, vec![4, 5, 6, 7]);
+    }
 }

@@ -50,7 +50,17 @@ pub fn show(state: &mut State, geometry: &Geometry3D, ui: &mut Ui) {
         .show_inside(ui, |ui| {
             ui.heading("3D Meshing");
             ui.label("Subdivisions per axis:");
-            ui.add(Slider::new(&mut state.subdivisions, 1..=30));
+            // Cap at 60 so a single cuboid can reach 60^3 ≈ 220k vertices,
+            // well above the 10k-particle target users typically want.
+            ui.add(Slider::new(&mut state.subdivisions, 1..=60));
+            // Quick reference for cuboid vertex counts so users know what
+            // they're picking before they hit Generate.
+            let n = state.subdivisions as usize;
+            ui.label(format!(
+                "cuboid: ≈{} verts, ≈{} tets",
+                (n + 1).pow(3),
+                n.pow(3) * 6
+            ));
 
             ui.add_space(4.0);
             if ui.button("Generate Mesh").clicked() {

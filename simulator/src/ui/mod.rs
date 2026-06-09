@@ -11,6 +11,17 @@ pub mod meshing;
 pub mod simulation;
 pub mod unicode_symbols;
 
+/// Logical namespace alias for the 2D pipeline pages, matching the
+/// `cpd::d2` / `mesh::d2` / `simulator::ui::d3` pattern (F20). Pages
+/// remain at their existing paths so the dozens of internal `super::`
+/// references in the 2D modules don't need to change; this module just
+/// makes `crate::ui::d2::drawing`, `crate::ui::d2::meshing`, etc.
+/// resolve so downstream code can write dimension-symmetric paths.
+pub mod d2 {
+    #[allow(unused_imports)]
+    pub use super::{boundary_conditions, drawing, meshing, simulation};
+}
+
 mod project_handle;
 use ecolor::Color32;
 use egui::{Context, KeyboardShortcut, Ui};

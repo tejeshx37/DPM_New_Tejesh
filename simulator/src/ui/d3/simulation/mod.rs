@@ -7,6 +7,7 @@
 //! mesh with per-tet edges colored by Von Mises stress.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use cpd::d3::{
     Axis, AxisTimeSeries, BoundaryCondition3D, Computer3D, Config3D, FailureCriteria3D,
@@ -18,16 +19,20 @@ use mesh::d3::Mesh3D;
 use nalgebra::Vector3;
 use serde::{Deserialize, Serialize};
 
+pub mod export;
+pub mod gpu;
+
 use super::drawing::viewport::{
     camera::OrbitCamera, project, scene_mesh, wgpu_scene, ViewportState,
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct State {
-    /// Index into the meshing state's `meshes` Vec selecting which mesh to
-    /// simulate. Single-mesh for this milestone; multi-body scenes are a
-    /// future iteration.
+    /// Legacy field from the single-mesh era — kept so old `.simproj`
+    /// files still deserialize. Multi-body scenes (B11) now always
+    /// combine every populated mesh in the scene into a single solver.
     #[serde(default)]
+    #[allow(dead_code)]
     pub selected_mesh: usize,
     /// Per-region BC choice, keyed by region name (e.g. "x_min").
     #[serde(default)]
@@ -44,15 +49,16 @@ pub struct State {
     pub running: bool,
     #[serde(default)]
     pub viewport: ViewportState,
-    /// Live solver state. Not persisted; rebuilt on demand.
-    #[serde(skip)]
+    /// Live solver state. Persisted across sessions (D16) so a paused
+    /// simulation resumes mid-run on reopen; defaulted on first load.
+    #[serde(default)]
     pub computer: Option<Computer3D>,
     /// Latest stress stats from the running solver.
-    #[serde(skip)]
+    #[serde(default)]
     pub stats: StressStats,
-    /// Time-series captured during simulation runs. Not persisted (the
-    /// solver itself isn't either); cleared on Reset / Rebuild.
-    #[serde(skip)]
+    /// Time-series captured during simulation runs (cleared on Reset /
+    /// Rebuild). Persisted alongside the solver.
+    #[serde(default)]
     pub history: History,
     /// Plots panel visibility + tunables.
     #[serde(default)]
@@ -61,6 +67,35 @@ pub struct State {
     /// the UI for ergonomics; converted to 0-based when accessed.
     #[serde(default)]
     pub inspect: InspectConfig,
+    /// Last directory the user exported CSV into (B10). Used as the
+    /// default for the next export so they don't pick repeatedly.
+    #[serde(default)]
+    pub last_export_dir: Option<PathBuf>,
+    /// Last export status message (#files written or error string).
+    #[serde(skip)]
+    pub last_export_status: Option<String>,
+    /// Opt-in GPU strain/stress kernel (E18). Off by default; the kernel
+    /// is built lazily on first use and only supports isotropic material.
+    #[serde(default)]
+    pub use_gpu_stresses: bool,
+    /// Lazy-initialised GPU compute kernel. Not persisted; rebuilt
+    /// on demand.
+    #[serde(skip)]
+    pub gpu_kernel: Option<gpu::GpuStressKernel>,
+    /// Last GPU init status — error message if init failed, "ready"
+    /// if it succeeded.
+    #[serde(skip)]
+    pub gpu_status: Option<String>,
+    /// User-pinned GPU adapter override. When `Some`, the kernel tries
+    /// to bind to this specific adapter on next build instead of using
+    /// wgpu's HighPerformance auto-pick. Persisted so the choice
+    /// survives a restart.
+    #[serde(default)]
+    pub gpu_preferred_adapter: Option<gpu::AdapterDisplay>,
+    /// Cached list of adapters wgpu can see on the host. Populated on
+    /// first open of the GPU panel; not persisted.
+    #[serde(skip)]
+    pub gpu_available_adapters: Vec<gpu::AdapterDisplay>,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -74,8 +109,9 @@ pub struct InspectConfig {
 }
 
 /// History buffer for time-series plotting. Capped at `MAX_SAMPLES` with
-/// drop-oldest behavior so long runs don't grow unbounded.
-#[derive(Debug, Default, Clone)]
+/// drop-oldest behavior so long runs don't grow unbounded. Serializable
+/// so a paused simulation can be saved and resumed across sessions (D16).
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct History {
     pub stress: Vec<(f32, StressStats)>,
     /// Per-region (mean_displacement, mean_force) over time. Key is the
@@ -201,6 +237,13 @@ impl Default for State {
             history: History::default(),
             plots: PlotConfig::default(),
             inspect: InspectConfig::default(),
+            last_export_dir: None,
+            last_export_status: None,
+            use_gpu_stresses: false,
+            gpu_kernel: None,
+            gpu_status: None,
+            gpu_preferred_adapter: None,
+            gpu_available_adapters: Vec::new(),
         }
     }
 }
@@ -264,33 +307,39 @@ impl RegionBc {
     }
 }
 
+/// Stitch together every populated mesh in the scene into a single
+/// `Mesh3D` so the solver sees one combined system (B11). Returns
+/// `None` if no mesh is available.
+pub fn combine_active(meshes: &[Option<Mesh3D>]) -> Option<Mesh3D> {
+    let refs: Vec<&Mesh3D> = meshes.iter().filter_map(|m| m.as_ref()).collect();
+    if refs.is_empty() {
+        None
+    } else {
+        Some(Mesh3D::combine(&refs))
+    }
+}
+
 pub fn show(state: &mut State, meshes: &[Option<Mesh3D>], ui: &mut Ui) {
+    let combined = combine_active(meshes);
     SidePanel::right("d3_sim_side_panel")
         .resizable(true)
         .default_width(300.0)
         .show_inside(ui, |ui| {
             ui.heading("3D Simulation");
             ui.separator();
-            add_mesh_picker(state, meshes, ui);
+            add_mesh_summary(meshes, &combined, ui);
 
-            let active_mesh = meshes
-                .get(state.selected_mesh)
-                .and_then(|m| m.as_ref());
-
-            if active_mesh.is_none() {
+            let Some(mesh) = combined.as_ref() else {
                 ui.colored_label(
                     Color32::YELLOW,
                     "No mesh available. Generate one on the Meshing page first.",
                 );
                 return;
-            }
-            let mesh = active_mesh.unwrap();
+            };
 
             ui.collapsing("Material", |ui| add_material_controls(state, ui));
             ui.collapsing("Integration", |ui| add_integration_controls(state, ui));
-            ui.collapsing("Boundary Conditions", |ui| {
-                add_bc_controls(state, mesh, ui)
-            });
+            ui.label("Boundary conditions are set on the Boundary Conditions page.");
             ui.collapsing("Inspect", |ui| add_inspect_controls(state, ui));
 
             ui.separator();
@@ -304,11 +353,50 @@ pub fn show(state: &mut State, meshes: &[Option<Mesh3D>], ui: &mut Ui) {
             // rather than just at frame boundaries (smoother curves).
             let steps = state.steps_per_frame as u64;
             let stride = state.plots.sample_stride.max(1) as u64;
-            let active_mesh = meshes
-                .get(state.selected_mesh)
-                .and_then(|m| m.as_ref());
+            let active_mesh = combined.as_ref();
+            // GPU strain/stress path (E18). The kernel is built lazily on
+            // first use; failures fall back to CPU and surface a status
+            // message instead of panicking.
+            let gpu_active = state.use_gpu_stresses
+                && gpu::GpuStressKernel::supports(&c.config.material);
+            if gpu_active && state.gpu_kernel.is_none() {
+                match gpu::GpuStressKernel::new(state.gpu_preferred_adapter.as_ref()) {
+                    Ok(k) => {
+                        state.gpu_status = Some(format!("GPU ready: {}", k.adapter.label()));
+                        state.gpu_kernel = Some(k);
+                    }
+                    Err(e) => {
+                        state.gpu_status = Some(format!("GPU init failed: {e} — using CPU"));
+                        state.use_gpu_stresses = false;
+                    }
+                }
+            }
+            let mut gpu_active = gpu_active && state.gpu_kernel.is_some();
             for _ in 0..steps {
-                c.step();
+                if gpu_active {
+                    let kernel = state.gpu_kernel.as_mut().unwrap();
+                    match kernel.compute_stresses(c) {
+                        Ok(stresses) => {
+                            c.apply_external_stresses(&stresses);
+                            c.assemble_forces_and_integrate();
+                        }
+                        Err(e) => {
+                            // Persistent runtime failure: drop the kernel
+                            // and turn the toggle off so we don't re-fail
+                            // every frame. User can re-enable explicitly
+                            // after addressing the cause.
+                            state.gpu_status = Some(format!(
+                                "GPU compute failed: {e} — GPU disabled, using CPU"
+                            ));
+                            state.gpu_kernel = None;
+                            state.use_gpu_stresses = false;
+                            gpu_active = false;
+                            c.step();
+                        }
+                    }
+                } else {
+                    c.step();
+                }
                 if c.iterations % stride == 0 {
                     let t = c.time();
                     let stats = c.stress_stats();
@@ -352,28 +440,24 @@ pub fn show(state: &mut State, meshes: &[Option<Mesh3D>], ui: &mut Ui) {
             .default_height(200.0)
             .show_inside(ui, |ui| add_plots(state, ui));
     }
-    show_viewport(state, meshes, ui);
+    show_viewport(state, combined.as_ref(), ui);
 }
 
-fn add_mesh_picker(state: &mut State, meshes: &[Option<Mesh3D>], ui: &mut Ui) {
-    let available: Vec<usize> = meshes
-        .iter()
-        .enumerate()
-        .filter_map(|(i, m)| m.as_ref().map(|_| i))
-        .collect();
-    if available.is_empty() {
-        return;
-    }
-    if !available.contains(&state.selected_mesh) {
-        state.selected_mesh = available[0];
-    }
-    ComboBox::from_label("Mesh to simulate")
-        .selected_text(format!("Mesh #{}", state.selected_mesh + 1))
-        .show_ui(ui, |ui| {
-            for i in &available {
-                ui.selectable_value(&mut state.selected_mesh, *i, format!("Mesh #{}", i + 1));
-            }
-        });
+fn add_mesh_summary(meshes: &[Option<Mesh3D>], combined: &Option<Mesh3D>, ui: &mut Ui) {
+    let body_count = meshes.iter().filter(|m| m.is_some()).count();
+    let (verts, tets) = combined
+        .as_ref()
+        .map(|m| (m.vertex_count(), m.tet_count()))
+        .unwrap_or((0, 0));
+    ui.horizontal(|ui| {
+        ui.label(format!(
+            "{} bod{} combined → {} verts, {} tets",
+            body_count,
+            if body_count == 1 { "y" } else { "ies" },
+            verts,
+            tets
+        ));
+    });
 }
 
 fn add_material_controls(state: &mut State, ui: &mut Ui) {
@@ -506,9 +590,82 @@ fn add_integration_controls(state: &mut State, ui: &mut Ui) {
         ui.label("Steps/frame");
         ui.add(Slider::new(&mut state.steps_per_frame, 1..=1000));
     });
+    let supports_gpu = gpu::GpuStressKernel::supports(&state.material);
+    ui.horizontal(|ui| {
+        ui.add_enabled(
+            supports_gpu,
+            egui::Checkbox::new(&mut state.use_gpu_stresses, "GPU strain/stress (E18)"),
+        );
+        if !supports_gpu {
+            state.use_gpu_stresses = false;
+            let reason = if !matches!(state.material, MaterialProps3D::Isotropic(_)) {
+                "(isotropic only for now)"
+            } else {
+                "(disabled while failure criteria are configured)"
+            };
+            ui.label(reason);
+        }
+    });
+    if state.use_gpu_stresses {
+        add_gpu_controls(state, ui);
+    }
 }
 
-fn add_bc_controls(state: &mut State, mesh: &Mesh3D, ui: &mut Ui) {
+fn add_gpu_controls(state: &mut State, ui: &mut Ui) {
+    ui.indent("gpu_controls_indent", |ui| {
+        // Picked GPU label.
+        if let Some(k) = state.gpu_kernel.as_ref() {
+            ui.label(format!("Active GPU: {}", k.adapter.label()));
+        } else if let Some(msg) = state.gpu_status.as_deref() {
+            ui.label(msg);
+        } else {
+            ui.label("GPU will be initialised on first run.");
+        }
+
+        // Lazy populate the adapter list the first time the panel is
+        // shown; cheap enough to re-poll on demand via a button if the
+        // user docks / undocks an eGPU.
+        if state.gpu_available_adapters.is_empty() {
+            state.gpu_available_adapters = gpu::list_adapters();
+        }
+        ui.horizontal(|ui| {
+            ui.label("Override:");
+            let mut selection = state.gpu_preferred_adapter.clone();
+            let current_label = selection
+                .as_ref()
+                .map(|a| a.label())
+                .unwrap_or_else(|| "Auto (HighPerformance)".to_string());
+            egui::ComboBox::from_id_source("gpu_override")
+                .selected_text(current_label)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut selection, None, "Auto (HighPerformance)");
+                    for a in &state.gpu_available_adapters {
+                        ui.selectable_value(&mut selection, Some(a.clone()), a.label());
+                    }
+                });
+            if selection != state.gpu_preferred_adapter {
+                state.gpu_preferred_adapter = selection;
+                // Drop the kernel so the new preference is honored on
+                // the next step. Keep the toggle on.
+                state.gpu_kernel = None;
+                state.gpu_status = Some("override changed — rebuilding on next step".to_string());
+            }
+            if ui.small_button("rescan").on_hover_text("Re-enumerate adapters").clicked() {
+                state.gpu_available_adapters = gpu::list_adapters();
+            }
+        });
+
+        if let Some(k) = state.gpu_kernel.as_ref() {
+            ui.collapsing("Init log", |ui| {
+                for line in &k.init_log {
+                    ui.monospace(line);
+                }
+            });
+        }
+    });
+}
+
+pub fn add_bc_controls(state: &mut State, mesh: &Mesh3D, ui: &mut Ui) {
     for region in &mesh.boundary_faces.regions {
         let entry = state.region_bcs.entry(region.name.clone()).or_default();
         ui.group(|ui| {
@@ -677,6 +834,27 @@ fn add_run_controls(state: &mut State, mesh: &Mesh3D, ui: &mut Ui) {
                 .clamp_range(1..=1000u32),
         );
         ui.label("steps");
+    });
+    ui.horizontal(|ui| {
+        if ui.button("Export CSV…").clicked() {
+            let start = state
+                .last_export_dir
+                .clone()
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+            if let Some(dir) = rfd::FileDialog::new().set_directory(start).pick_folder() {
+                let report = export::export(state, Some(mesh), &dir);
+                if let Some(err) = report.error {
+                    state.last_export_status = Some(format!("Export failed: {err}"));
+                } else {
+                    state.last_export_status =
+                        Some(format!("Wrote {} files to {}", report.files.len(), dir.display()));
+                    state.last_export_dir = Some(dir);
+                }
+            }
+        }
+        if let Some(msg) = state.last_export_status.as_deref() {
+            ui.label(msg);
+        }
     });
 }
 
@@ -889,27 +1067,24 @@ fn region_color(i: usize) -> Color32 {
     PALETTE[i % PALETTE.len()]
 }
 
-fn show_viewport(state: &mut State, meshes: &[Option<Mesh3D>], ui: &mut Ui) {
+pub fn show_viewport(state: &mut State, active_mesh: Option<&Mesh3D>, ui: &mut Ui) {
     let available = ui.available_size();
     let size = Vec2::new(available.x.max(100.0), available.y.max(100.0));
     let (response, painter) = ui.allocate_painter(size, Sense::click_and_drag());
     let rect = response.rect;
 
     // Auto-frame on first render.
-    let aabb = meshes
-        .get(state.selected_mesh)
-        .and_then(|m| m.as_ref())
-        .map(|m| {
-            let lo = m
-                .vertices
-                .iter()
-                .fold(Vector3::repeat(f64::INFINITY), |acc, v| acc.inf(v));
-            let hi = m
-                .vertices
-                .iter()
-                .fold(Vector3::repeat(f64::NEG_INFINITY), |acc, v| acc.sup(v));
-            (lo, hi)
-        });
+    let aabb = active_mesh.map(|m| {
+        let lo = m
+            .vertices
+            .iter()
+            .fold(Vector3::repeat(f64::INFINITY), |acc, v| acc.inf(v));
+        let hi = m
+            .vertices
+            .iter()
+            .fold(Vector3::repeat(f64::NEG_INFINITY), |acc, v| acc.sup(v));
+        (lo, hi)
+    });
 
     if state.viewport.auto_frame {
         if let Some((lo, hi)) = aabb {
@@ -930,7 +1105,6 @@ fn show_viewport(state: &mut State, meshes: &[Option<Mesh3D>], ui: &mut Ui) {
     // If we have a running computer, draw the deformed mesh surface
     // colored by Von Mises stress averaged over each vertex's incident
     // tets. Otherwise show the reference mesh's surface in solid grey.
-    let active_mesh = meshes.get(state.selected_mesh).and_then(|m| m.as_ref());
     if let (Some(c), Some(mesh)) = (state.computer.as_ref(), active_mesh) {
         let s_min = state.stats.min_von_mises;
         let s_max = state.stats.max_von_mises.max(s_min + 1e-12);

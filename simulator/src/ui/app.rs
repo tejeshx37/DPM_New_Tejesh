@@ -881,6 +881,14 @@ impl App {
                         let geometry = page_data.d3_state.drawing.geometry.clone();
                         d3::meshing::show(&mut page_data.d3_state.meshing, &geometry, ui);
                     }
+                    d3::Stage::BoundaryConditions => {
+                        let meshes = page_data.d3_state.meshing.meshes.clone();
+                        d3::boundary_conditions::show(
+                            &mut page_data.d3_state.simulation,
+                            &meshes,
+                            ui,
+                        );
+                    }
                     d3::Stage::Simulation => {
                         let meshes = page_data.d3_state.meshing.meshes.clone();
                         d3::simulation::show(
@@ -900,7 +908,24 @@ fn add_d3_stage_bar(stage: &mut d3::Stage, ui: &mut Ui) {
     ui.horizontal(|ui| {
         ui.selectable_value(stage, d3::Stage::Drawing, "Drawing");
         ui.selectable_value(stage, d3::Stage::Meshing, "Meshing");
+        ui.selectable_value(
+            stage,
+            d3::Stage::BoundaryConditions,
+            "Boundary Conditions",
+        );
         ui.selectable_value(stage, d3::Stage::Simulation, "Simulation");
+        ui.separator();
+        if let Some(next) = stage.next() {
+            if ui
+                .button(format!("Next → {}", next.label()))
+                .on_hover_text("Advance to the next pipeline phase")
+                .clicked()
+            {
+                *stage = next;
+            }
+        } else {
+            ui.label("(end of pipeline)");
+        }
     });
     ui.separator();
 }
