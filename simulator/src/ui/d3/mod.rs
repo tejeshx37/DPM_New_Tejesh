@@ -46,7 +46,7 @@ impl Stage {
 
 /// Persisted state for the 3D pipeline of a project. Mirrors the structure
 /// of the 2D `PageData` but lives behind the dimension toggle.
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct State {
     #[serde(default)]
     pub stage: Stage,

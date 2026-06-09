@@ -85,13 +85,18 @@ impl Computer3D {
         self.iterations as f32 * self.config.time_delta_seconds
     }
 
-    /// Advance one explicit Verlet step.
+    /// Advance one explicit Verlet step on the CPU.
     pub fn step(&mut self) {
-        let material = self.config.material;
-        let dt = self.config.time_delta_seconds;
-        let damping = material.damping();
+        self.update_strain_stress_cpu();
+        self.assemble_forces_and_integrate();
+    }
 
-        // 1. Element strain/stress refresh.
+    /// CPU strain/stress refresh. Public so external (e.g. GPU) compute
+    /// paths can swap themselves in by calling
+    /// [`Computer3D::apply_external_stresses`] followed by
+    /// [`Computer3D::assemble_forces_and_integrate`].
+    pub fn update_strain_stress_cpu(&mut self) {
+        let material = self.config.material;
         let node_positions: Vec<Vector3<f32>> = self.nodes.iter().map(|n| n.position).collect();
         self.elements.par_iter_mut().for_each(|element| {
             let p = [
@@ -102,11 +107,29 @@ impl Computer3D {
             ];
             element.update_strain_stress(p, &material);
         });
+    }
 
-        // 2. Assemble internal forces onto nodes. Compute per-element
-        //    contributions in parallel, then scatter sequentially (the
-        //    scatter is cheap relative to stress eval and avoids the need
-        //    for atomic adds).
+    /// Overwrite per-element stresses from an external buffer (e.g. a
+    /// GPU compute kernel). Bypasses CPU stress evaluation entirely;
+    /// `strain_energy` and `is_broken` are not updated, so failure
+    /// criteria are inert under this path. Caller is responsible for
+    /// supplying one stress per element in the same order as
+    /// `self.elements`.
+    pub fn apply_external_stresses(&mut self, stresses: &[Matrix3<f32>]) {
+        for (e, s) in self.elements.iter_mut().zip(stresses.iter()) {
+            e.stress = *s;
+        }
+    }
+
+    /// Force-assembly + integration phase. Assumes stresses are already
+    /// up to date on each element (either via
+    /// [`Computer3D::update_strain_stress_cpu`] or
+    /// [`Computer3D::apply_external_stresses`]).
+    pub fn assemble_forces_and_integrate(&mut self) {
+        let material = self.config.material;
+        let dt = self.config.time_delta_seconds;
+        let damping = material.damping();
+
         let per_element_forces: Vec<[Vector3<f32>; 4]> = self
             .elements
             .par_iter()
@@ -121,9 +144,6 @@ impl Computer3D {
             }
         }
 
-        // 3. Integrate. Pinned axes overwrite velocity to zero on those
-        //    components; ConstantDisplacement ramps the position
-        //    directly; ConstantForce adds to nodal force first.
         let t = self.time();
         self.nodes.par_iter_mut().for_each(|n| {
             let bc = n.bc.clone();

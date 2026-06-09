@@ -2998,6 +2998,7 @@ dependencies = [
  "nalgebra-ext",
  "paste",
  "pathdiff",
+ "pollster",
  "pot",
  "pretty_env_logger",
  "puffin",

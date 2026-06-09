@@ -20,12 +20,13 @@ use nalgebra::Vector3;
 use serde::{Deserialize, Serialize};
 
 pub mod export;
+pub mod gpu;
 
 use super::drawing::viewport::{
     camera::OrbitCamera, project, scene_mesh, wgpu_scene, ViewportState,
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct State {
     /// Legacy field from the single-mesh era — kept so old `.simproj`
     /// files still deserialize. Multi-body scenes (B11) now always
@@ -73,6 +74,18 @@ pub struct State {
     /// Last export status message (#files written or error string).
     #[serde(skip)]
     pub last_export_status: Option<String>,
+    /// Opt-in GPU strain/stress kernel (E18). Off by default; the kernel
+    /// is built lazily on first use and only supports isotropic material.
+    #[serde(default)]
+    pub use_gpu_stresses: bool,
+    /// Lazy-initialised GPU compute kernel. Not persisted; rebuilt
+    /// on demand.
+    #[serde(skip)]
+    pub gpu_kernel: Option<gpu::GpuStressKernel>,
+    /// Last GPU init status — error message if init failed, "ready"
+    /// if it succeeded.
+    #[serde(skip)]
+    pub gpu_status: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -216,6 +229,9 @@ impl Default for State {
             inspect: InspectConfig::default(),
             last_export_dir: None,
             last_export_status: None,
+            use_gpu_stresses: false,
+            gpu_kernel: None,
+            gpu_status: None,
         }
     }
 }
@@ -326,8 +342,42 @@ pub fn show(state: &mut State, meshes: &[Option<Mesh3D>], ui: &mut Ui) {
             let steps = state.steps_per_frame as u64;
             let stride = state.plots.sample_stride.max(1) as u64;
             let active_mesh = combined.as_ref();
+            // GPU strain/stress path (E18). The kernel is built lazily on
+            // first use; failures fall back to CPU and surface a status
+            // message instead of panicking.
+            let gpu_active = state.use_gpu_stresses
+                && gpu::GpuStressKernel::supports(&c.config.material);
+            if gpu_active && state.gpu_kernel.is_none() {
+                match gpu::GpuStressKernel::new() {
+                    Ok(k) => {
+                        state.gpu_kernel = Some(k);
+                        state.gpu_status = Some("GPU ready".to_string());
+                    }
+                    Err(e) => {
+                        state.gpu_status = Some(format!("GPU init failed: {e} — using CPU"));
+                        state.use_gpu_stresses = false;
+                    }
+                }
+            }
+            let mut gpu_active = gpu_active && state.gpu_kernel.is_some();
             for _ in 0..steps {
-                c.step();
+                if gpu_active {
+                    let kernel = state.gpu_kernel.as_mut().unwrap();
+                    match kernel.compute_stresses(c) {
+                        Ok(stresses) => {
+                            c.apply_external_stresses(&stresses);
+                            c.assemble_forces_and_integrate();
+                        }
+                        Err(e) => {
+                            state.gpu_status =
+                                Some(format!("GPU compute failed: {e} — falling back to CPU"));
+                            gpu_active = false;
+                            c.step();
+                        }
+                    }
+                } else {
+                    c.step();
+                }
                 if c.iterations % stride == 0 {
                     let t = c.time();
                     let stats = c.stress_stats();
@@ -521,6 +571,20 @@ fn add_integration_controls(state: &mut State, ui: &mut Ui) {
         ui.label("Steps/frame");
         ui.add(Slider::new(&mut state.steps_per_frame, 1..=1000));
     });
+    let supports_gpu = gpu::GpuStressKernel::supports(&state.material);
+    ui.horizontal(|ui| {
+        ui.add_enabled(
+            supports_gpu,
+            egui::Checkbox::new(&mut state.use_gpu_stresses, "GPU strain/stress (E18)"),
+        );
+        if !supports_gpu {
+            state.use_gpu_stresses = false;
+            ui.label("(isotropic only for now)");
+        }
+    });
+    if let Some(msg) = state.gpu_status.as_deref() {
+        ui.label(msg);
+    }
 }
 
 pub fn add_bc_controls(state: &mut State, mesh: &Mesh3D, ui: &mut Ui) {
