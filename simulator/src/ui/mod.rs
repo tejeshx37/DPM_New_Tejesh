@@ -18,6 +18,7 @@ pub mod unicode_symbols;
 /// makes `crate::ui::d2::drawing`, `crate::ui::d2::meshing`, etc.
 /// resolve so downstream code can write dimension-symmetric paths.
 pub mod d2 {
+    #[allow(unused_imports)]
     pub use super::{boundary_conditions, drawing, meshing, simulation};
 }
 

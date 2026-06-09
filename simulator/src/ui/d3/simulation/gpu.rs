@@ -26,8 +26,13 @@ use cpd::d3::{Computer3D, MaterialProps3D};
 use nalgebra::Matrix3;
 use wgpu::util::DeviceExt;
 
-/// Workgroup size in the WGSL shader; must match `@workgroup_size(...)`.
-const WORKGROUP_SIZE: u32 = 64;
+/// Default workgroup size literally baked into the [`SHADER_SRC`] string
+/// (`@workgroup_size(64)`); the kernel rewrites this at pipeline build
+/// to the backend-specific value from [`pick_workgroup_size`]. The
+/// constant exists only so future tooling that lints the WGSL source
+/// in isolation sees a valid number.
+#[allow(dead_code)]
+const DEFAULT_WORKGROUP_SIZE: u32 = 64;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable, Default)]
@@ -55,6 +60,59 @@ struct MaterialUniform {
     _pad: [f32; 2],
 }
 
+/// Workgroup size baked into the shader at pipeline-build time. Picked
+/// per backend in [`pick_workgroup_size`]: Metal threadgroups perform
+/// best around 32 threads, while Vulkan/DX12 favour 64.
+fn pick_workgroup_size(backend: wgpu::Backend) -> u32 {
+    match backend {
+        wgpu::Backend::Metal => 32,
+        _ => 64,
+    }
+}
+
+/// Lightweight, owned snapshot of `wgpu::AdapterInfo` for UI display and
+/// for matching the user's manual override selection against enumerated
+/// adapters. Cloneable / Eq so the egui ComboBox can use it as state.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub struct AdapterDisplay {
+    pub name: String,
+    pub backend: String,
+    pub device_type: String,
+    pub vendor: u32,
+    pub device: u32,
+}
+
+impl AdapterDisplay {
+    fn from_info(info: &wgpu::AdapterInfo) -> Self {
+        Self {
+            name: info.name.clone(),
+            backend: format!("{:?}", info.backend),
+            device_type: format!("{:?}", info.device_type),
+            vendor: info.vendor,
+            device: info.device,
+        }
+    }
+
+    pub fn label(&self) -> String {
+        format!("{} ({}, {})", self.name, self.device_type, self.backend)
+    }
+}
+
+/// Enumerate every adapter wgpu can see on the host. Used by the UI to
+/// populate the manual-override dropdown. Creates a throwaway Instance;
+/// cheap relative to kernel init.
+pub fn list_adapters() -> Vec<AdapterDisplay> {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::PRIMARY,
+        ..Default::default()
+    });
+    instance
+        .enumerate_adapters(wgpu::Backends::PRIMARY)
+        .iter()
+        .map(|a| AdapterDisplay::from_info(&a.get_info()))
+        .collect()
+}
+
 /// Resident GPU compute kernel for element strain/stress. Buffers are
 /// resized as element / node counts grow, never shrunk.
 #[derive(Debug)]
@@ -73,6 +131,15 @@ pub struct GpuStressKernel {
     stresses_readback: wgpu::Buffer,
     stresses_cap: u64,
     material: wgpu::Buffer,
+    /// Workgroup size baked into this pipeline (32 on Metal, 64 elsewhere).
+    workgroup_size: u32,
+    /// Snapshot of the adapter info this kernel was built against, for
+    /// UI display.
+    pub adapter: AdapterDisplay,
+    /// Chronological log of init attempts ("tried Adapter X → ok",
+    /// "tried Adapter Y → failed because Z"). Surfaced in the UI so the
+    /// user can see why a particular GPU was or wasn't picked.
+    pub init_log: Vec<String>,
 
     last_positions: usize,
     last_elements: usize,
@@ -83,21 +150,48 @@ const INITIAL_ELEMENTS: u64 = 256;
 
 impl GpuStressKernel {
     /// Initialise an independent wgpu instance + device + queue and
-    /// build the compute pipeline. Returns a human-readable error string
-    /// if no GPU adapter is available (CI, headless environments).
-    pub fn new() -> Result<Self, String> {
+    /// build the compute pipeline.
+    ///
+    /// `preferred` lets the user override wgpu's automatic adapter
+    /// pick (PowerPreference::HighPerformance, which picks the
+    /// discrete GPU on hybrid systems). When `Some`, this scans the
+    /// enumerated adapter list for a matching (name, backend) pair.
+    /// Falls back to the auto pick if the preferred adapter is missing
+    /// at runtime; logs each attempt in [`Self::init_log`] so the UI
+    /// can show why a given GPU was picked.
+    pub fn new(preferred: Option<&AdapterDisplay>) -> Result<Self, String> {
+        let mut init_log: Vec<String> = Vec::new();
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::PRIMARY,
             ..Default::default()
         });
-        let adapter = pollster::block_on(instance.request_adapter(
-            &wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: None,
-                force_fallback_adapter: false,
-            },
-        ))
-        .ok_or_else(|| "no wgpu adapter available".to_string())?;
+
+        let adapter = if let Some(pref) = preferred {
+            let mut found = None;
+            for cand in instance.enumerate_adapters(wgpu::Backends::PRIMARY) {
+                let info = cand.get_info();
+                let display = AdapterDisplay::from_info(&info);
+                if display.name == pref.name && display.backend == pref.backend {
+                    init_log.push(format!("matched user override: {}", display.label()));
+                    found = Some(cand);
+                    break;
+                }
+            }
+            match found {
+                Some(a) => a,
+                None => {
+                    init_log.push(format!(
+                        "user override {} not found at runtime; falling back to auto-pick",
+                        pref.label()
+                    ));
+                    request_default_adapter(&instance, &mut init_log)?
+                }
+            }
+        } else {
+            request_default_adapter(&instance, &mut init_log)?
+        };
+
+        let adapter_display = AdapterDisplay::from_info(&adapter.get_info());
 
         let (device, queue) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
@@ -111,9 +205,16 @@ impl GpuStressKernel {
         let device = Arc::new(device);
         let queue = Arc::new(queue);
 
+        let workgroup_size = pick_workgroup_size(adapter.get_info().backend);
+        init_log.push(format!(
+            "workgroup_size={workgroup_size} for backend {}",
+            adapter_display.backend
+        ));
+
+        let shader_src = SHADER_SRC.replace("@workgroup_size(64)", &format!("@workgroup_size({workgroup_size})"));
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("dpm_stress_kernel_shader"),
-            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(SHADER_SRC)),
+            source: wgpu::ShaderSource::Wgsl(Cow::Owned(shader_src)),
         });
 
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -180,6 +281,9 @@ impl GpuStressKernel {
             stresses_readback,
             stresses_cap: INITIAL_ELEMENTS,
             material,
+            workgroup_size,
+            adapter: adapter_display,
+            init_log,
             last_positions: 0,
             last_elements: 0,
         })
@@ -259,8 +363,9 @@ impl GpuStressKernel {
         self.queue
             .write_buffer(&self.material, 0, bytemuck::bytes_of(&mat));
 
-        // Dispatch.
-        let n_groups = (n_elements as u32 + WORKGROUP_SIZE - 1) / WORKGROUP_SIZE;
+        // Dispatch. Workgroup size matches what was baked into the shader
+        // at pipeline build (32 on Metal, 64 elsewhere).
+        let n_groups = (n_elements as u32 + self.workgroup_size - 1) / self.workgroup_size;
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -390,6 +495,28 @@ impl GpuStressKernel {
             ],
         })
     }
+}
+
+/// Default-pick path: HighPerformance preference (picks the discrete
+/// GPU on hybrid systems). Logged into `init_log` so the UI can show
+/// what was tried.
+fn request_default_adapter(
+    instance: &wgpu::Instance,
+    init_log: &mut Vec<String>,
+) -> Result<wgpu::Adapter, String> {
+    init_log.push("auto-pick: PowerPreference::HighPerformance".to_string());
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        compatible_surface: None,
+        force_fallback_adapter: false,
+    }))
+    .ok_or_else(|| "no wgpu adapter available".to_string())?;
+    let info = adapter.get_info();
+    init_log.push(format!(
+        "picked {} ({:?}, {:?})",
+        info.name, info.device_type, info.backend
+    ));
+    Ok(adapter)
 }
 
 fn storage_binding(binding: u32, read_only: bool) -> wgpu::BindGroupLayoutEntry {
@@ -564,7 +691,7 @@ mod tests {
     /// (CI containers, etc).
     #[test]
     fn gpu_matches_cpu_on_uniaxial_stretch() {
-        let Ok(mut kernel) = GpuStressKernel::new() else {
+        let Ok(mut kernel) = GpuStressKernel::new(None) else {
             eprintln!("no GPU adapter; skipping E18 parity test");
             return;
         };

@@ -86,6 +86,16 @@ pub struct State {
     /// if it succeeded.
     #[serde(skip)]
     pub gpu_status: Option<String>,
+    /// User-pinned GPU adapter override. When `Some`, the kernel tries
+    /// to bind to this specific adapter on next build instead of using
+    /// wgpu's HighPerformance auto-pick. Persisted so the choice
+    /// survives a restart.
+    #[serde(default)]
+    pub gpu_preferred_adapter: Option<gpu::AdapterDisplay>,
+    /// Cached list of adapters wgpu can see on the host. Populated on
+    /// first open of the GPU panel; not persisted.
+    #[serde(skip)]
+    pub gpu_available_adapters: Vec<gpu::AdapterDisplay>,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -232,6 +242,8 @@ impl Default for State {
             use_gpu_stresses: false,
             gpu_kernel: None,
             gpu_status: None,
+            gpu_preferred_adapter: None,
+            gpu_available_adapters: Vec::new(),
         }
     }
 }
@@ -348,10 +360,10 @@ pub fn show(state: &mut State, meshes: &[Option<Mesh3D>], ui: &mut Ui) {
             let gpu_active = state.use_gpu_stresses
                 && gpu::GpuStressKernel::supports(&c.config.material);
             if gpu_active && state.gpu_kernel.is_none() {
-                match gpu::GpuStressKernel::new() {
+                match gpu::GpuStressKernel::new(state.gpu_preferred_adapter.as_ref()) {
                     Ok(k) => {
+                        state.gpu_status = Some(format!("GPU ready: {}", k.adapter.label()));
                         state.gpu_kernel = Some(k);
-                        state.gpu_status = Some("GPU ready".to_string());
                     }
                     Err(e) => {
                         state.gpu_status = Some(format!("GPU init failed: {e} — using CPU"));
@@ -582,9 +594,63 @@ fn add_integration_controls(state: &mut State, ui: &mut Ui) {
             ui.label("(isotropic only for now)");
         }
     });
-    if let Some(msg) = state.gpu_status.as_deref() {
-        ui.label(msg);
+    if state.use_gpu_stresses {
+        add_gpu_controls(state, ui);
     }
+}
+
+fn add_gpu_controls(state: &mut State, ui: &mut Ui) {
+    ui.indent("gpu_controls_indent", |ui| {
+        // Picked GPU label.
+        if let Some(k) = state.gpu_kernel.as_ref() {
+            ui.label(format!("Active GPU: {}", k.adapter.label()));
+        } else if let Some(msg) = state.gpu_status.as_deref() {
+            ui.label(msg);
+        } else {
+            ui.label("GPU will be initialised on first run.");
+        }
+
+        // Lazy populate the adapter list the first time the panel is
+        // shown; cheap enough to re-poll on demand via a button if the
+        // user docks / undocks an eGPU.
+        if state.gpu_available_adapters.is_empty() {
+            state.gpu_available_adapters = gpu::list_adapters();
+        }
+        ui.horizontal(|ui| {
+            ui.label("Override:");
+            let mut selection = state.gpu_preferred_adapter.clone();
+            let current_label = selection
+                .as_ref()
+                .map(|a| a.label())
+                .unwrap_or_else(|| "Auto (HighPerformance)".to_string());
+            egui::ComboBox::from_id_source("gpu_override")
+                .selected_text(current_label)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut selection, None, "Auto (HighPerformance)");
+                    for a in &state.gpu_available_adapters {
+                        ui.selectable_value(&mut selection, Some(a.clone()), a.label());
+                    }
+                });
+            if selection != state.gpu_preferred_adapter {
+                state.gpu_preferred_adapter = selection;
+                // Drop the kernel so the new preference is honored on
+                // the next step. Keep the toggle on.
+                state.gpu_kernel = None;
+                state.gpu_status = Some("override changed — rebuilding on next step".to_string());
+            }
+            if ui.small_button("rescan").on_hover_text("Re-enumerate adapters").clicked() {
+                state.gpu_available_adapters = gpu::list_adapters();
+            }
+        });
+
+        if let Some(k) = state.gpu_kernel.as_ref() {
+            ui.collapsing("Init log", |ui| {
+                for line in &k.init_log {
+                    ui.monospace(line);
+                }
+            });
+        }
+    });
 }
 
 pub fn add_bc_controls(state: &mut State, mesh: &Mesh3D, ui: &mut Ui) {
