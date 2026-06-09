@@ -58,6 +58,23 @@ impl Shape3D {
         }
     }
 
+    /// Canonical boundary-region names that the mesher will produce for
+    /// this shape. Used by the Boundary Conditions phase to enumerate
+    /// regions *before* a mesh has been generated, so the user can
+    /// assign BCs against shapes directly. Stays in sync with
+    /// `mesh::d3::cuboid::generate`, `sphere::generate`, and
+    /// `cylinder::generate` — if those add or rename regions, update
+    /// this list too.
+    pub fn region_names(&self) -> &'static [&'static str] {
+        match self {
+            Shape3D::Cube { .. } | Shape3D::Cuboid { .. } => {
+                &["x_min", "x_max", "y_min", "y_max", "z_min", "z_max"]
+            }
+            Shape3D::Sphere { .. } => &["surface"],
+            Shape3D::Cylinder { .. } => &["side", "bottom", "top"],
+        }
+    }
+
     /// Axis-aligned bounding box for camera framing. Returns (min, max).
     pub fn aabb(&self) -> (Vector3<f64>, Vector3<f64>) {
         match self {

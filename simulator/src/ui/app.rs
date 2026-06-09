@@ -878,10 +878,10 @@ impl App {
                         d3::drawing::show(&mut page_data.d3_state.drawing, ui);
                     }
                     d3::Stage::BoundaryConditions => {
-                        let meshes = page_data.d3_state.meshing.meshes.clone();
+                        let geometry = page_data.d3_state.drawing.geometry.clone();
                         d3::boundary_conditions::show(
                             &mut page_data.d3_state.simulation,
-                            &meshes,
+                            &geometry,
                             ui,
                         );
                     }
