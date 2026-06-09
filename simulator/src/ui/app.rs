@@ -877,10 +877,6 @@ impl App {
                     d3::Stage::Drawing => {
                         d3::drawing::show(&mut page_data.d3_state.drawing, ui);
                     }
-                    d3::Stage::Meshing => {
-                        let geometry = page_data.d3_state.drawing.geometry.clone();
-                        d3::meshing::show(&mut page_data.d3_state.meshing, &geometry, ui);
-                    }
                     d3::Stage::BoundaryConditions => {
                         let meshes = page_data.d3_state.meshing.meshes.clone();
                         d3::boundary_conditions::show(
@@ -888,6 +884,10 @@ impl App {
                             &meshes,
                             ui,
                         );
+                    }
+                    d3::Stage::Meshing => {
+                        let geometry = page_data.d3_state.drawing.geometry.clone();
+                        d3::meshing::show(&mut page_data.d3_state.meshing, &geometry, ui);
                     }
                     d3::Stage::Simulation => {
                         let meshes = page_data.d3_state.meshing.meshes.clone();
@@ -907,12 +907,12 @@ impl App {
 fn add_d3_stage_bar(stage: &mut d3::Stage, ui: &mut Ui) {
     ui.horizontal(|ui| {
         ui.selectable_value(stage, d3::Stage::Drawing, "Drawing");
-        ui.selectable_value(stage, d3::Stage::Meshing, "Meshing");
         ui.selectable_value(
             stage,
             d3::Stage::BoundaryConditions,
             "Boundary Conditions",
         );
+        ui.selectable_value(stage, d3::Stage::Meshing, "Meshing");
         ui.selectable_value(stage, d3::Stage::Simulation, "Simulation");
         ui.separator();
         if let Some(next) = stage.next() {

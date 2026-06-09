@@ -272,6 +272,93 @@ fn vec3_f32_v(v: &Vector3<f64>) -> [f32; 3] {
     [v.x as f32, v.y as f32, v.z as f32]
 }
 
+/// Generate wireframe edge quads for a `Mesh3D` using its boundary faces.
+/// Each unique edge becomes a thin quad (2 triangles) slightly expanded along
+/// the face normal, producing a wireframe appearance that renders through the
+/// fast wgpu triangle pipeline (single draw call) instead of thousands of
+/// individual egui line segments.
+///
+/// `edge_color` is a flat RGBA color applied to all edges of the mesh.
+/// `thickness` controls the world-space width of each edge quad.
+pub fn wireframe_edges_for_mesh(
+    mesh: &mesh::d3::Mesh3D,
+    edge_color: [f32; 4],
+    thickness: f64,
+) -> Vec<Vertex> {
+    use std::collections::HashSet;
+
+    // Collect unique edges and a representative face normal per edge.
+    let mut seen = HashSet::new();
+    let mut edges: Vec<(usize, usize, Vector3<f64>)> = Vec::new();
+
+    for region in &mesh.boundary_faces.regions {
+        for f in &region.faces {
+            let a = mesh.vertices[f[0]];
+            let b = mesh.vertices[f[1]];
+            let c = mesh.vertices[f[2]];
+            let normal = (b - a).cross(&(c - a));
+            let n_len = normal.norm();
+            let normal = if n_len > 1e-12 { normal / n_len } else { Vector3::new(0.0, 1.0, 0.0) };
+
+            for &(i, j) in &[(f[0], f[1]), (f[1], f[2]), (f[2], f[0])] {
+                let key = if i < j { (i, j) } else { (j, i) };
+                if seen.insert(key) {
+                    edges.push((i, j, normal));
+                }
+            }
+        }
+    }
+
+    // Each edge becomes a thin quad (2 triangles). The quad is expanded
+    // perpendicular to the edge direction, offset slightly along the face
+    // normal so it floats just above the surface.
+    let half_t = thickness * 0.5;
+    let mut tris = Vec::with_capacity(edges.len() * 6);
+
+    for (i, j, face_normal) in &edges {
+        let p0 = mesh.vertices[*i];
+        let p1 = mesh.vertices[*j];
+        let edge_dir = p1 - p0;
+        let edge_len = edge_dir.norm();
+        if edge_len < 1e-12 {
+            continue;
+        }
+
+        // Expand direction: cross(edge, face_normal) gives a vector in the
+        // surface plane perpendicular to the edge.
+        let expand = edge_dir.cross(face_normal);
+        let expand_len = expand.norm();
+        let expand = if expand_len > 1e-12 {
+            expand / expand_len * half_t
+        } else {
+            // Degenerate: use face normal as fallback expansion.
+            *face_normal * half_t
+        };
+
+        // Offset slightly along face normal to prevent z-fighting with any
+        // solid surface rendered behind.
+        let offset = *face_normal * (thickness * 0.1);
+
+        let a = p0 - expand + offset;
+        let b = p0 + expand + offset;
+        let c = p1 + expand + offset;
+        let d = p1 - expand + offset;
+
+        let n = [face_normal.x as f32, face_normal.y as f32, face_normal.z as f32];
+
+        // Quad as two CCW triangles: a-b-c, a-c-d
+        tris.push(Vertex { position: vec3_f32(&a), normal: n, color: edge_color });
+        tris.push(Vertex { position: vec3_f32(&b), normal: n, color: edge_color });
+        tris.push(Vertex { position: vec3_f32(&c), normal: n, color: edge_color });
+
+        tris.push(Vertex { position: vec3_f32(&a), normal: n, color: edge_color });
+        tris.push(Vertex { position: vec3_f32(&c), normal: n, color: edge_color });
+        tris.push(Vertex { position: vec3_f32(&d), normal: n, color: edge_color });
+    }
+
+    tris
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

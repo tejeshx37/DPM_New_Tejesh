@@ -17,6 +17,10 @@ pub struct State {
     /// scaled by extents ratio for cuboids).
     #[serde(default = "default_subdivisions")]
     pub subdivisions: u32,
+    /// Desired particle (vertex) count. When the user edits this, subdivisions
+    /// are auto-derived via cube root. `0` means manual subdivision mode.
+    #[serde(default)]
+    pub particle_count: u32,
     /// Generated meshes, one per source shape. Cleared when subdivisions or
     /// geometry change. Indices match `geometry.shapes`.
     #[serde(default)]
@@ -36,11 +40,22 @@ impl Default for State {
     fn default() -> Self {
         Self {
             subdivisions: 4,
+            particle_count: 0,
             meshes: Vec::new(),
             viewport: ViewportState::default(),
             error: None,
         }
     }
+}
+
+/// Derive subdivisions from a desired particle (vertex) count.
+/// Vertex count for a cuboid mesh ≈ (n+1)^3, so n ≈ count^(1/3) - 1.
+fn subdivisions_from_particle_count(count: u32) -> u32 {
+    if count <= 1 {
+        return 1;
+    }
+    let n = (count as f64).cbrt().round() as u32;
+    n.saturating_sub(1).max(1).min(60)
 }
 
 pub fn show(state: &mut State, geometry: &Geometry3D, ui: &mut Ui) {
@@ -49,10 +64,34 @@ pub fn show(state: &mut State, geometry: &Geometry3D, ui: &mut Ui) {
         .default_width(240.0)
         .show_inside(ui, |ui| {
             ui.heading("3D Meshing");
+
+            // --- Particle count input ---
+            ui.label("Desired particle count:");
+            let mut pc = state.particle_count;
+            if ui.add(egui::DragValue::new(&mut pc).speed(10.0).clamp_range(0..=300_000u32)).changed() {
+                state.particle_count = pc;
+                if pc > 0 {
+                    state.subdivisions = subdivisions_from_particle_count(pc);
+                }
+            }
+            if state.particle_count > 0 {
+                ui.label(format!(
+                    "→ subdivisions: {}  (≈{} actual particles)",
+                    state.subdivisions,
+                    (state.subdivisions as usize + 1).pow(3)
+                ));
+            }
+            ui.add_space(2.0);
+
+            // --- Manual subdivisions slider ---
             ui.label("Subdivisions per axis:");
             // Cap at 60 so a single cuboid can reach 60^3 ≈ 220k vertices,
             // well above the 10k-particle target users typically want.
-            ui.add(Slider::new(&mut state.subdivisions, 1..=60));
+            if ui.add(Slider::new(&mut state.subdivisions, 1..=60)).changed() {
+                // When the user drags the slider manually, clear the particle
+                // count so it doesn't fight back.
+                state.particle_count = 0;
+            }
             // Quick reference for cuboid vertex counts so users know what
             // they're picking before they hit Generate.
             let n = state.subdivisions as usize;
@@ -100,27 +139,37 @@ pub fn show(state: &mut State, geometry: &Geometry3D, ui: &mut Ui) {
         .camera
         .view_projection(rect.width() / rect.height().max(1.0));
 
-    // Render each generated mesh's boundary surface through the wgpu
-    // scene callback (filled, shaded triangles via its own vertex
-    // buffer). Previously we drew every tet's 6 edges through
-    // egui::Painter, which routes into egui's shared vertex buffer and
-    // blows past wgpu's 256 MB max for any mesh over ~30^3 voxels.
-    // Surface-only rendering is O(n^2) in subdivisions instead of
-    // O(n^3) and scales to the 60-subdivision cap without crashing.
-    let mut all_tris: Vec<wgpu_scene::Vertex> = Vec::new();
+    // Render wireframe via wgpu: a faint transparent solid surface for depth
+    // perception + bright wireframe edge quads on top. Both go into a single
+    // wgpu draw call (batched vertex buffer), so this is GPU-accelerated and
+    // scales to 60+ subdivisions without freezing the UI.
+    let mut all_verts: Vec<wgpu_scene::Vertex> = Vec::new();
+
+    // Edge thickness adapts to camera distance so edges stay visible.
+    let cam_dist = state.viewport.camera.distance();
+    let edge_thickness = cam_dist * 0.003;
+
+    // Per-body colors: faint fill + bright wireframe edge.
+    let body_colors: &[([f32; 4], [f32; 4])] = &[
+        ([0.30, 0.50, 0.70, 0.12], [0.40, 0.75, 1.00, 1.0]),  // blue
+        ([0.70, 0.40, 0.40, 0.12], [1.00, 0.55, 0.55, 1.0]),  // red
+        ([0.40, 0.65, 0.45, 0.12], [0.55, 1.00, 0.70, 1.0]),  // green
+        ([0.70, 0.60, 0.35, 0.12], [1.00, 0.85, 0.45, 1.0]),  // yellow
+    ];
+
     for (idx, mesh) in state.meshes.iter().flatten().enumerate() {
-        // Per-body tint so adjacent bodies are distinguishable.
-        let tint = match idx % 4 {
-            0 => [0.70, 0.86, 1.00, 0.95],
-            1 => [1.00, 0.78, 0.78, 0.95],
-            2 => [0.78, 1.00, 0.84, 0.95],
-            _ => [1.00, 0.92, 0.70, 0.95],
-        };
-        all_tris.extend(scene_mesh::triangles_for_mesh(mesh, |_| tint));
+        let (fill_color, edge_color) = body_colors[idx % body_colors.len()];
+
+        // Faint solid fill for depth context.
+        all_verts.extend(scene_mesh::triangles_for_mesh(mesh, |_| fill_color));
+
+        // Bright wireframe edge quads.
+        all_verts.extend(scene_mesh::wireframe_edges_for_mesh(mesh, edge_color, edge_thickness));
     }
-    if !all_tris.is_empty() {
-        wgpu_scene::sort_back_to_front(&mut all_tris, &view_proj);
-        let cb = wgpu_scene::SceneCallback::from_world_mvp(all_tris, &view_proj);
+
+    if !all_verts.is_empty() {
+        wgpu_scene::sort_back_to_front(&mut all_verts, &view_proj);
+        let cb = wgpu_scene::SceneCallback::from_world_mvp(all_verts, &view_proj);
         painter.add(eframe::egui_wgpu::Callback::new_paint_callback(rect, cb));
     }
 

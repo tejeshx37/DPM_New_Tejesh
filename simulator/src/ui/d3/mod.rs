@@ -17,8 +17,8 @@ use serde::{Deserialize, Serialize};
 pub enum Stage {
     #[default]
     Drawing,
-    Meshing,
     BoundaryConditions,
+    Meshing,
     Simulation,
 }
 
@@ -27,9 +27,9 @@ impl Stage {
     /// the end of the pipeline.
     pub fn next(self) -> Option<Stage> {
         match self {
-            Stage::Drawing => Some(Stage::Meshing),
-            Stage::Meshing => Some(Stage::BoundaryConditions),
-            Stage::BoundaryConditions => Some(Stage::Simulation),
+            Stage::Drawing => Some(Stage::BoundaryConditions),
+            Stage::BoundaryConditions => Some(Stage::Meshing),
+            Stage::Meshing => Some(Stage::Simulation),
             Stage::Simulation => None,
         }
     }
@@ -37,8 +37,8 @@ impl Stage {
     pub fn label(self) -> &'static str {
         match self {
             Stage::Drawing => "Drawing",
-            Stage::Meshing => "Meshing",
             Stage::BoundaryConditions => "Boundary Conditions",
+            Stage::Meshing => "Meshing",
             Stage::Simulation => "Simulation",
         }
     }
