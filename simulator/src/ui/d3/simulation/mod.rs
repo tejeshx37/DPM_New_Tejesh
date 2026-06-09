@@ -9,8 +9,9 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+pub use cpd::d3::Axis;
 use cpd::d3::{
-    Axis, AxisTimeSeries, BoundaryCondition3D, Computer3D, Config3D, FailureCriteria3D,
+    AxisTimeSeries, BoundaryCondition3D, Computer3D, Config3D, FailureCriteria3D,
     IsotropicProps3D, MaterialProps3D, OrthotropicProps3D, RegionAverages, StressStats,
 };
 use egui::{Color32, ComboBox, DragValue, Sense, SidePanel, Slider, Stroke, TopBottomPanel, Ui, Vec2};
@@ -273,7 +274,7 @@ pub enum BcKind {
 }
 
 impl BcKind {
-    fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             BcKind::Free => "Free",
             BcKind::Pinned => "Pinned",
@@ -307,16 +308,17 @@ impl RegionBc {
     }
 }
 
-/// Stitch together every populated mesh in the scene into a single
-/// `Mesh3D` so the solver sees one combined system (B11). Returns
-/// `None` if no mesh is available.
+/// Stitch every populated mesh in the scene into a single `Mesh3D` so
+/// the solver sees one combined system (B11). Returns `None` if no
+/// mesh is available. Body numbering is by **slice position**, not
+/// populated index — see `Mesh3D::combine` for why this matters for the
+/// Boundary Conditions phase.
 pub fn combine_active(meshes: &[Option<Mesh3D>]) -> Option<Mesh3D> {
-    let refs: Vec<&Mesh3D> = meshes.iter().filter_map(|m| m.as_ref()).collect();
-    if refs.is_empty() {
-        None
-    } else {
-        Some(Mesh3D::combine(&refs))
+    if meshes.iter().all(|m| m.is_none()) {
+        return None;
     }
+    let refs: Vec<Option<&Mesh3D>> = meshes.iter().map(|m| m.as_ref()).collect();
+    Some(Mesh3D::combine(&refs))
 }
 
 pub fn show(state: &mut State, meshes: &[Option<Mesh3D>], ui: &mut Ui) {
@@ -665,6 +667,12 @@ fn add_gpu_controls(state: &mut State, ui: &mut Ui) {
     });
 }
 
+/// Mesh-driven BC editor. The new pipeline order (Drawing → BC →
+/// Meshing → Simulation) means the BC phase now reads geometry shapes
+/// directly via `super::boundary_conditions::add_geometry_bc_controls`,
+/// so this function is currently unused. Kept around in case a debug
+/// "edit BCs against the meshed body" view returns later.
+#[allow(dead_code)]
 pub fn add_bc_controls(state: &mut State, mesh: &Mesh3D, ui: &mut Ui) {
     for region in &mesh.boundary_faces.regions {
         let entry = state.region_bcs.entry(region.name.clone()).or_default();
@@ -720,6 +728,7 @@ pub fn add_bc_controls(state: &mut State, mesh: &Mesh3D, ui: &mut Ui) {
     }
 }
 
+#[allow(dead_code)]
 fn time_profile_editor(region_name: &str, profile: &mut AxisTimeSeries, ui: &mut Ui) {
     ui.label("Keyframes (time, value) per axis");
     for (axis_label, series) in [
@@ -785,6 +794,7 @@ fn add_inspect_controls(state: &mut State, ui: &mut Ui) {
     }
 }
 
+#[allow(dead_code)]
 fn axes_row(ui: &mut Ui, axes: &mut Axis) {
     ui.horizontal(|ui| {
         ui.label("Axes:");
@@ -794,6 +804,7 @@ fn axes_row(ui: &mut Ui, axes: &mut Axis) {
     });
 }
 
+#[allow(dead_code)]
 fn vec_row(ui: &mut Ui, label: &str, v: &mut [f32; 3]) {
     ui.horizontal(|ui| {
         ui.label(label);
@@ -1175,6 +1186,61 @@ pub fn show_viewport(state: &mut State, active_mesh: Option<&Mesh3D>, ui: &mut U
             state.stats.min_von_mises,
             state.stats.max_von_mises,
         );
+    }
+
+    paint_zoom_controls(&mut state.viewport, rect, ui);
+}
+
+/// On-screen zoom in/out + reset buttons in the bottom-left corner of
+/// the viewport. Useful on trackpads and on large displays where users
+/// want a precise step. Also bind +/- on the keyboard while the
+/// viewport area is hovered. Reset triggers auto-framing on the next
+/// paint.
+fn paint_zoom_controls(viewport: &mut ViewportState, rect: egui::Rect, ui: &mut Ui) {
+    let pos = rect.left_bottom() + egui::vec2(8.0, -8.0 - 28.0);
+    let btn_size = egui::vec2(28.0, 28.0);
+    let btn_rect = |i: usize| {
+        egui::Rect::from_min_size(
+            egui::pos2(pos.x + i as f32 * (btn_size.x + 4.0), pos.y),
+            btn_size,
+        )
+    };
+
+    let mut zoom_in = ui
+        .put(btn_rect(0), egui::Button::new("+").min_size(btn_size))
+        .on_hover_text("Zoom in")
+        .clicked();
+    let mut zoom_out = ui
+        .put(btn_rect(1), egui::Button::new("−").min_size(btn_size))
+        .on_hover_text("Zoom out")
+        .clicked();
+    let reset_view = ui
+        .put(btn_rect(2), egui::Button::new("⟳").min_size(btn_size))
+        .on_hover_text("Reset view (auto-frame on next paint)")
+        .clicked();
+
+    // Keyboard +/- when the pointer is over the viewport area.
+    if ui.rect_contains_pointer(rect) {
+        let (kin, kout) = ui.input(|i| {
+            (
+                i.key_pressed(egui::Key::Plus) || i.key_pressed(egui::Key::Equals),
+                i.key_pressed(egui::Key::Minus),
+            )
+        });
+        zoom_in |= kin;
+        zoom_out |= kout;
+    }
+
+    // Camera::zoom takes scroll-delta semantics: positive = zoom in.
+    // 50 ≈ a chunky discrete step that feels right for button clicks.
+    if zoom_in {
+        viewport.camera.zoom(50.0);
+    }
+    if zoom_out {
+        viewport.camera.zoom(-50.0);
+    }
+    if reset_view {
+        viewport.auto_frame = true;
     }
 }
 

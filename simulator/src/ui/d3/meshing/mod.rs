@@ -65,15 +65,38 @@ pub fn show(state: &mut State, geometry: &Geometry3D, ui: &mut Ui) {
         .show_inside(ui, |ui| {
             ui.heading("3D Meshing");
 
+            if geometry.shapes.is_empty() {
+                ui.colored_label(
+                    Color32::YELLOW,
+                    "No shapes drawn yet. Add at least one shape on the Drawing page first.",
+                );
+                return;
+            }
+
             // --- Particle count input ---
+            // Auto-regenerates on Enter or focus loss so the user
+            // doesn't also have to click "Generate Mesh" after typing
+            // a number. Live-drag changes only update the predicted
+            // subdivision count to avoid hammering the mesher.
             ui.label("Desired particle count:");
             let mut pc = state.particle_count;
-            if ui.add(egui::DragValue::new(&mut pc).speed(10.0).clamp_range(0..=300_000u32)).changed() {
+            let pc_response = ui.add(
+                egui::DragValue::new(&mut pc)
+                    .speed(10.0)
+                    .clamp_range(0..=300_000u32),
+            );
+            if pc_response.changed() {
                 state.particle_count = pc;
                 if pc > 0 {
                     state.subdivisions = subdivisions_from_particle_count(pc);
                 }
             }
+            // egui 0.27 calls this drag_released; renamed to
+            // dragged_stopped in a later release.
+            #[allow(deprecated)]
+            let pc_committed = pc_response.lost_focus()
+                && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                || (pc_response.drag_released() && pc > 0);
             if state.particle_count > 0 {
                 ui.label(format!(
                     "→ subdivisions: {}  (≈{} actual particles)",
@@ -87,11 +110,14 @@ pub fn show(state: &mut State, geometry: &Geometry3D, ui: &mut Ui) {
             ui.label("Subdivisions per axis:");
             // Cap at 60 so a single cuboid can reach 60^3 ≈ 220k vertices,
             // well above the 10k-particle target users typically want.
-            if ui.add(Slider::new(&mut state.subdivisions, 1..=60)).changed() {
+            let sub_response = ui.add(Slider::new(&mut state.subdivisions, 1..=60));
+            if sub_response.changed() {
                 // When the user drags the slider manually, clear the particle
                 // count so it doesn't fight back.
                 state.particle_count = 0;
             }
+            #[allow(deprecated)]
+            let sub_committed = sub_response.drag_released();
             // Quick reference for cuboid vertex counts so users know what
             // they're picking before they hit Generate.
             let n = state.subdivisions as usize;
@@ -102,7 +128,7 @@ pub fn show(state: &mut State, geometry: &Geometry3D, ui: &mut Ui) {
             ));
 
             ui.add_space(4.0);
-            if ui.button("Generate Mesh").clicked() {
+            if ui.button("Generate Mesh").clicked() || pc_committed || sub_committed {
                 regenerate(state, geometry);
             }
             if ui.button("Clear").clicked() {

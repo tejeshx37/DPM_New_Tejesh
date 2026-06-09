@@ -47,12 +47,19 @@ impl Mesh3D {
 
     /// Stitch multiple meshes into one. Vertex and tet indices are
     /// offset so the merged mesh references its own flat arrays;
-    /// boundary regions are renamed `"<prefix>{idx}/{region}"` so the
-    /// simulator can address each source mesh's boundaries independently
-    /// after combination (B11 — multi-body 3D scenes).
-    pub fn combine(meshes: &[&Mesh3D]) -> Mesh3D {
+    /// boundary regions are renamed `"body{i+1}/{region}"` where `i` is
+    /// the **slice position**, not the populated-mesh index.
+    ///
+    /// This matters when some shapes in the scene aren't meshed yet: a
+    /// `None` entry consumes a body number without contributing
+    /// regions, so the names stay stable. The Boundary Conditions phase
+    /// relies on this — it pre-populates BC HashMap keys as
+    /// `body{shape_index+1}/{region}` before any mesh exists, and they
+    /// must still match once meshes are generated.
+    pub fn combine(meshes: &[Option<&Mesh3D>]) -> Mesh3D {
         let mut out = Mesh3D::default();
-        for (i, m) in meshes.iter().enumerate() {
+        for (i, m_opt) in meshes.iter().enumerate() {
+            let Some(m) = m_opt else { continue };
             let v_offset = out.vertices.len();
             out.vertices.extend(m.vertices.iter().copied());
             for tet in &m.tetrahedra {
@@ -105,7 +112,7 @@ mod tests {
     fn combine_offsets_indices_and_renames_regions() {
         let a = unit_cube_with_one_tet();
         let b = unit_cube_with_one_tet();
-        let m = Mesh3D::combine(&[&a, &b]);
+        let m = Mesh3D::combine(&[Some(&a), Some(&b)]);
 
         assert_eq!(m.vertices.len(), 8);
         assert_eq!(m.tetrahedra.len(), 2);
@@ -121,5 +128,25 @@ mod tests {
             .collect();
         assert_eq!(names, vec!["body1/all", "body2/all"]);
         assert_eq!(m.boundary_faces.regions[1].vertices, vec![4, 5, 6, 7]);
+    }
+
+    /// `None` slots consume a body number without contributing regions.
+    /// This guarantee is what lets the BC phase use shape index for
+    /// stable region keys (`body{shape_index+1}/...`) even when some
+    /// shapes haven't been meshed yet.
+    #[test]
+    fn combine_skips_none_but_preserves_body_index() {
+        let a = unit_cube_with_one_tet();
+        let m = Mesh3D::combine(&[None, Some(&a), None]);
+        assert_eq!(m.vertices.len(), 4);
+        assert_eq!(m.tetrahedra.len(), 1);
+        // The only populated mesh was at slot 1 -> body2.
+        let names: Vec<&str> = m
+            .boundary_faces
+            .regions
+            .iter()
+            .map(|r| r.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["body2/all"]);
     }
 }
