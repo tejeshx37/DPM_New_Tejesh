@@ -2,13 +2,13 @@
 //! a tetrahedral mesh for each supported primitive, and renders the result
 //! in the same orbit-camera viewport used by the drawing page.
 
-use egui::{Color32, ScrollArea, Sense, SidePanel, Slider, Stroke, Ui, Vec2};
+use egui::{Color32, ScrollArea, Sense, SidePanel, Slider, Ui, Vec2};
 use mesh::d3::{cuboid, cylinder, sphere, Mesh3D};
 use serde::{Deserialize, Serialize};
 
 use super::drawing::{
     shape::{Geometry3D, Shape3D},
-    viewport::{camera::OrbitCamera, project, ViewportState},
+    viewport::{camera::OrbitCamera, scene_mesh, wgpu_scene, ViewportState},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,21 +100,28 @@ pub fn show(state: &mut State, geometry: &Geometry3D, ui: &mut Ui) {
         .camera
         .view_projection(rect.width() / rect.height().max(1.0));
 
-    let stroke = Stroke::new(0.6, Color32::from_rgb(180, 220, 255));
-    for mesh in state.meshes.iter().flatten() {
-        // Draw each tetrahedron's 6 edges. Visually equivalent to drawing
-        // the surface wireframe for the boundary faces, but this also shows
-        // interior edges which is useful for sanity-checking the mesh.
-        for tet in &mesh.tetrahedra {
-            for (a, b) in [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)] {
-                if let (Some(pa), Some(pb)) = (
-                    project(&view_proj, rect, mesh.vertices[tet[a]]),
-                    project(&view_proj, rect, mesh.vertices[tet[b]]),
-                ) {
-                    painter.line_segment([pa, pb], stroke);
-                }
-            }
-        }
+    // Render each generated mesh's boundary surface through the wgpu
+    // scene callback (filled, shaded triangles via its own vertex
+    // buffer). Previously we drew every tet's 6 edges through
+    // egui::Painter, which routes into egui's shared vertex buffer and
+    // blows past wgpu's 256 MB max for any mesh over ~30^3 voxels.
+    // Surface-only rendering is O(n^2) in subdivisions instead of
+    // O(n^3) and scales to the 60-subdivision cap without crashing.
+    let mut all_tris: Vec<wgpu_scene::Vertex> = Vec::new();
+    for (idx, mesh) in state.meshes.iter().flatten().enumerate() {
+        // Per-body tint so adjacent bodies are distinguishable.
+        let tint = match idx % 4 {
+            0 => [0.70, 0.86, 1.00, 0.95],
+            1 => [1.00, 0.78, 0.78, 0.95],
+            2 => [0.78, 1.00, 0.84, 0.95],
+            _ => [1.00, 0.92, 0.70, 0.95],
+        };
+        all_tris.extend(scene_mesh::triangles_for_mesh(mesh, |_| tint));
+    }
+    if !all_tris.is_empty() {
+        wgpu_scene::sort_back_to_front(&mut all_tris, &view_proj);
+        let cb = wgpu_scene::SceneCallback::from_world_mvp(all_tris, &view_proj);
+        painter.add(eframe::egui_wgpu::Callback::new_paint_callback(rect, cb));
     }
 
     let hud = format!(
