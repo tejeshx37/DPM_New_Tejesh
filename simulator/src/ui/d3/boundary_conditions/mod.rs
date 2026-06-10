@@ -105,11 +105,20 @@ fn add_geometry_bc_controls(sim_state: &mut simulation::State, geometry: &Geomet
         ui.collapsing(
             format!("Body {} ({})", idx + 1, shape.kind().label()),
             |ui| {
-                for region_name in shape.region_names() {
+                for (region_idx, region_name) in shape.region_names().iter().enumerate() {
                     let key = region_key(idx, region_name);
                     let entry = sim_state.region_bcs.entry(key.clone()).or_default();
                     ui.group(|ui| {
-                        ui.strong(format!("{}/{}", body_label(idx + 1), region_name));
+                        // Lead with the B# label that's painted on the
+                        // shape's face in the preview viewport so users
+                        // can map between the panel and the 3D scene at
+                        // a glance.
+                        ui.strong(format!(
+                            "B{} — {}/{}",
+                            region_idx + 1,
+                            body_label(idx + 1),
+                            region_name
+                        ));
                         bc_kind_combo(&key, entry, ui);
                         bc_parameter_fields(entry, ui);
                     });
@@ -243,6 +252,50 @@ fn show_preview_viewport(sim_state: &mut simulation::State, geometry: &Geometry3
             paint_bc_marker(
                 &painter, rect, &view_proj, bc, base, normal, arrow_len, &key,
             );
+        }
+    }
+
+    // B-labels on each face, matching the BC panel's "B1 — body1/x_min"
+    // headings. Red when the region has a configured (non-Free) BC,
+    // white otherwise — same convention as the reference 2D mesher.
+    paint_region_labels(&painter, rect, &view_proj, geometry, &sim_state.region_bcs);
+}
+
+fn paint_region_labels(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    view_proj: &nalgebra::Matrix4<f64>,
+    geometry: &Geometry3D,
+    region_bcs: &std::collections::HashMap<String, RegionBc>,
+) {
+    let (lo, hi) = geometry.aabb();
+    let scene_scale = (hi - lo).norm().max(1e-6);
+    let font = egui::FontId::monospace(14.0);
+    let configured_color = Color32::from_rgb(255, 140, 140);
+    let free_color = Color32::from_gray(230);
+
+    for (idx, (shape, _op)) in geometry.shapes.iter().enumerate() {
+        let (s_lo, s_hi) = shape.aabb();
+        for (region_idx, region_name) in shape.region_names().iter().enumerate() {
+            let key = region_key(idx, region_name);
+            let configured = region_bcs
+                .get(&key)
+                .map(|b| !matches!(b.kind, BcKind::Free))
+                .unwrap_or(false);
+            let normal = region_outward_normal(region_name);
+            let centroid = region_centroid(s_lo, s_hi, region_name);
+            // Push slightly off the surface so the text doesn't z-fight
+            // with the body and is readable from any angle.
+            let anchor = centroid + normal * scene_scale * 0.04;
+            if let Some(p) = project(view_proj, rect, anchor) {
+                painter.text(
+                    p,
+                    egui::Align2::CENTER_CENTER,
+                    format!("B{}", region_idx + 1),
+                    font.clone(),
+                    if configured { configured_color } else { free_color },
+                );
+            }
         }
     }
 }
