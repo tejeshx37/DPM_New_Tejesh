@@ -407,6 +407,50 @@ pub fn particles_for_mesh(
     tris
 }
 
+/// Deformed-mesh variant of [`particles_for_mesh`]. Reads live world
+/// positions from `positions_f32` (so particles track the solver's
+/// node positions during a run) and calls `color_for(vertex_index)`
+/// per particle — lets the Simulation viewport tint particles by
+/// per-vertex state (cracked-red vs bright yellow).
+pub fn particles_for_mesh_colored<F>(
+    mesh: &mesh::d3::Mesh3D,
+    positions_f32: &[Vector3<f32>],
+    camera_right: Vector3<f64>,
+    camera_up: Vector3<f64>,
+    size: f64,
+    color_for: F,
+) -> Vec<Vertex>
+where
+    F: Fn(usize) -> [f32; 4],
+{
+    let r = camera_right * (size * 0.5);
+    let u = camera_up * (size * 0.5);
+    let light = Vector3::new(0.4_f64, 0.75, 0.5).normalize();
+    let n = [light.x as f32, light.y as f32, light.z as f32];
+    let mut tris = Vec::with_capacity(mesh.vertices.len() * 6);
+    for i in 0..mesh.vertices.len() {
+        let Some(pos_f32) = positions_f32.get(i) else {
+            // Solver hasn't caught up to the mesh yet (stale-solver
+            // guard catches this upstream but the per-vertex loop
+            // stays defensive).
+            continue;
+        };
+        let p = Vector3::new(pos_f32.x as f64, pos_f32.y as f64, pos_f32.z as f64);
+        let a = p - r - u;
+        let b = p + r - u;
+        let c = p + r + u;
+        let d = p - r + u;
+        let color = color_for(i);
+        tris.push(Vertex { position: vec3_f32(&a), normal: n, color });
+        tris.push(Vertex { position: vec3_f32(&b), normal: n, color });
+        tris.push(Vertex { position: vec3_f32(&c), normal: n, color });
+        tris.push(Vertex { position: vec3_f32(&a), normal: n, color });
+        tris.push(Vertex { position: vec3_f32(&c), normal: n, color });
+        tris.push(Vertex { position: vec3_f32(&d), normal: n, color });
+    }
+    tris
+}
+
 /// Clip a triangle stream against `axis . p >= plane_offset`. Triangles
 /// fully on the keep side are passed through; triangles with at least
 /// one vertex on the cut side are dropped (rough clipping, no per-tri

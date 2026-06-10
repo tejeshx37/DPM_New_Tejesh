@@ -113,6 +113,11 @@ pub struct State {
     /// automatic action when the duration is reached.
     #[serde(default)]
     pub auto_export: bool,
+    /// Render every solver node as a billboard quad in the Simulation
+    /// viewport. Lets users see particles moving and the crack
+    /// propagating through the body, not just on the surface.
+    #[serde(default = "default_true")]
+    pub sim_show_particles: bool,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -264,6 +269,7 @@ impl Default for State {
             engine_config_open: false,
             body_force: [0.0; 3],
             auto_export: false,
+            sim_show_particles: true,
         }
     }
 }
@@ -340,13 +346,34 @@ pub fn combine_active(meshes: &[Option<Mesh3D>]) -> Option<Mesh3D> {
     Some(Mesh3D::combine(&refs))
 }
 
-pub fn show(state: &mut State, meshes: &[Option<Mesh3D>], ui: &mut Ui) {
+pub fn show(
+    state: &mut State,
+    geometry: &super::drawing::shape::Geometry3D,
+    meshes: &[Option<Mesh3D>],
+    ui: &mut Ui,
+) {
     let combined = combine_active(meshes);
     SidePanel::right("d3_sim_side_panel")
         .resizable(true)
         .default_width(300.0)
         .show_inside(ui, |ui| {
             ui.heading("3D Simulation");
+            // "X of N shapes meshed" status — amber when unmeshed
+            // shapes remain in the scene, so users notice before they
+            // hit Run.
+            let populated = meshes.iter().filter(|m| m.is_some()).count();
+            let total = geometry.shapes.len();
+            let header_color = if total == 0 {
+                Color32::YELLOW
+            } else if populated < total {
+                Color32::from_rgb(255, 160, 100)
+            } else {
+                Color32::from_gray(200)
+            };
+            ui.colored_label(
+                header_color,
+                format!("Bodies: {populated} meshed / {total} drawn"),
+            );
             ui.separator();
             add_mesh_summary(meshes, &combined, ui);
 
@@ -870,6 +897,9 @@ fn add_run_controls(state: &mut State, mesh: &Mesh3D, ui: &mut Ui) {
         ui.label("steps");
     });
     ui.horizontal(|ui| {
+        ui.checkbox(&mut state.sim_show_particles, "Show particles");
+    });
+    ui.horizontal(|ui| {
         if ui.button("Export CSV…").clicked() {
             let start = state
                 .last_export_dir
@@ -1193,6 +1223,28 @@ pub fn show_viewport(state: &mut State, active_mesh: Option<&Mesh3D>, ui: &mut U
             color32_to_f32_rgba(heatmap(t))
         };
         let mut tris = scene_mesh::triangles_for_deformed(mesh, &positions_f32, color_for);
+        if state.sim_show_particles {
+            // Per-vertex tint: cracked-red on broken-adjacent nodes,
+            // bright yellow elsewhere. Reuses the touches_broken array
+            // already built for the surface color.
+            let particle_color_for = |i: usize| -> [f32; 4] {
+                if touches_broken.get(i).copied().unwrap_or(false) {
+                    [0.85, 0.10, 0.10, 1.0]
+                } else {
+                    [1.0, 1.0, 0.15, 1.0]
+                }
+            };
+            let (cam_right, cam_up, _) = state.viewport.camera.basis_world();
+            let particle_size = state.viewport.camera.distance() * 0.004;
+            tris.extend(scene_mesh::particles_for_mesh_colored(
+                mesh,
+                &positions_f32,
+                cam_right,
+                cam_up,
+                particle_size,
+                particle_color_for,
+            ));
+        }
         if !tris.is_empty() {
             wgpu_scene::sort_back_to_front(&mut tris, &view_proj);
             let cb = wgpu_scene::SceneCallback::from_world_mvp(tris, &view_proj);
@@ -1722,9 +1774,12 @@ fn handle_camera_input(camera: &mut OrbitCamera, response: &egui::Response, ui: 
         camera.pan(d.x, d.y);
     }
     if response.hovered() {
-        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+        let (scroll, pinch) = ui.input(|i| (i.smooth_scroll_delta.y, i.zoom_delta()));
         if scroll.abs() > 0.0 {
             camera.zoom(scroll);
+        }
+        if (pinch - 1.0).abs() > 1e-4 {
+            camera.zoom_by(pinch);
         }
     }
 }

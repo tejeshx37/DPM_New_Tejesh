@@ -63,9 +63,12 @@ pub fn show(state: &mut ViewportState, geometry: &Geometry3D, ui: &mut Ui) {
         state.camera.pan(delta.x, delta.y);
     }
     if response.hovered() {
-        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+        let (scroll, pinch) = ui.input(|i| (i.smooth_scroll_delta.y, i.zoom_delta()));
         if scroll.abs() > 0.0 {
             state.camera.zoom(scroll);
+        }
+        if (pinch - 1.0).abs() > 1e-4 {
+            state.camera.zoom_by(pinch);
         }
     }
 
