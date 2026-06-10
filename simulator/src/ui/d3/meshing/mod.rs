@@ -157,12 +157,16 @@ pub fn show(
                     state.subdivisions = subdivisions_from_particle_count(pc);
                 }
             }
-            // egui 0.27 calls this drag_released; renamed to
-            // dragged_stopped in a later release.
+            // Fire when the user commits the new value, by any of:
+            //   - Enter while the DragValue is in text-edit mode
+            //   - clicking away (loses focus)
+            //   - releasing a drag that moved the value off zero
+            // Previously required Enter specifically, which silently
+            // dropped the change when users typed and clicked elsewhere.
+            // egui 0.27 calls this drag_released; renamed in 0.28+.
             #[allow(deprecated)]
-            let pc_committed = pc_response.lost_focus()
-                && ui.input(|i| i.key_pressed(egui::Key::Enter))
-                || (pc_response.drag_released() && pc > 0);
+            let pc_committed =
+                (pc_response.lost_focus() || pc_response.drag_released()) && pc > 0;
             if state.particle_count > 0 {
                 ui.label(format!(
                     "→ subdivisions: {}  (≈{} actual particles)",
@@ -251,11 +255,14 @@ pub fn show(
     let particle_size = cam_dist * 0.004;
 
     // Per-body colors: faint fill + bright wireframe edge + particle dot.
+    // Particles use a bright pure-yellow palette across all bodies so
+    // they pop against the dark background and stay easy to spot
+    // regardless of fill/edge tint.
     let body_colors: &[([f32; 4], [f32; 4], [f32; 4])] = &[
-        ([0.30, 0.50, 0.70, 0.12], [0.40, 0.75, 1.00, 1.0], [1.00, 0.78, 0.30, 1.0]),
-        ([0.70, 0.40, 0.40, 0.12], [1.00, 0.55, 0.55, 1.0], [1.00, 0.85, 0.40, 1.0]),
-        ([0.40, 0.65, 0.45, 0.12], [0.55, 1.00, 0.70, 1.0], [1.00, 0.90, 0.55, 1.0]),
-        ([0.70, 0.60, 0.35, 0.12], [1.00, 0.85, 0.45, 1.0], [0.90, 0.95, 0.45, 1.0]),
+        ([0.30, 0.50, 0.70, 0.12], [0.40, 0.75, 1.00, 1.0], [1.0, 1.0, 0.15, 1.0]),
+        ([0.70, 0.40, 0.40, 0.12], [1.00, 0.55, 0.55, 1.0], [1.0, 0.95, 0.20, 1.0]),
+        ([0.40, 0.65, 0.45, 0.12], [0.55, 1.00, 0.70, 1.0], [1.0, 1.00, 0.30, 1.0]),
+        ([0.70, 0.60, 0.35, 0.12], [1.00, 0.85, 0.45, 1.0], [1.0, 0.90, 0.10, 1.0]),
     ];
 
     let (cam_right, cam_up, _cam_fwd) = state.viewport.camera.basis_world();

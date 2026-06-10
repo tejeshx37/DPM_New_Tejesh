@@ -374,11 +374,14 @@ pub fn particles_for_mesh(
 ) -> Vec<Vertex> {
     let r = camera_right * (size * 0.5);
     let u = camera_up * (size * 0.5);
-    let n = [
-        (-camera_right.cross(&camera_up).x) as f32,
-        (-camera_right.cross(&camera_up).y) as f32,
-        (-camera_right.cross(&camera_up).z) as f32,
-    ];
+    // Set the particle normal to align with the scene light direction
+    // (matches `wgpu_scene::Uniforms::light_dir`) so Lambert shading
+    // evaluates to ~1.0 and particles render at the full vertex color
+    // regardless of camera angle. Keeps the bright yellow dots clearly
+    // visible against the dark background even when the camera orbits
+    // behind the light.
+    let light = Vector3::new(0.4_f64, 0.75, 0.5).normalize();
+    let n = [light.x as f32, light.y as f32, light.z as f32];
     let mut tris = Vec::with_capacity(mesh.vertices.len() * 6);
     for &p in &mesh.vertices {
         let a = p - r - u;
