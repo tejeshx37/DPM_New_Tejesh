@@ -20,6 +20,7 @@ use mesh::d3::Mesh3D;
 use nalgebra::Vector3;
 use serde::{Deserialize, Serialize};
 
+pub mod engine_config;
 pub mod export;
 pub mod gpu;
 
@@ -97,6 +98,21 @@ pub struct State {
     /// first open of the GPU panel; not persisted.
     #[serde(skip)]
     pub gpu_available_adapters: Vec<gpu::AdapterDisplay>,
+    /// Whether the Engine Config modal is currently open. Lets users
+    /// see every simulation parameter in one place instead of clicking
+    /// through individual side-panel collapsibles.
+    #[serde(skip)]
+    pub engine_config_open: bool,
+    /// Constant body acceleration (gravity-like). Applied per step as
+    /// `force += mass * body_force`. Stored as f32 triple for the
+    /// Engine Config dialog binding.
+    #[serde(default)]
+    pub body_force: [f32; 3],
+    /// Auto-export at end-of-run flag. The CSV button on the side
+    /// panel still does an on-demand export; this turns it into an
+    /// automatic action when the duration is reached.
+    #[serde(default)]
+    pub auto_export: bool,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -245,6 +261,9 @@ impl Default for State {
             gpu_status: None,
             gpu_preferred_adapter: None,
             gpu_available_adapters: Vec::new(),
+            engine_config_open: false,
+            body_force: [0.0; 3],
+            auto_export: false,
         }
     }
 }
@@ -339,6 +358,9 @@ pub fn show(state: &mut State, meshes: &[Option<Mesh3D>], ui: &mut Ui) {
                 return;
             };
 
+            if ui.button("⚙ Engine config…").clicked() {
+                state.engine_config_open = true;
+            }
             ui.collapsing("Material", |ui| add_material_controls(state, ui));
             ui.collapsing("Integration", |ui| add_integration_controls(state, ui));
             ui.label("Boundary conditions are set on the Boundary Conditions page.");
@@ -443,6 +465,7 @@ pub fn show(state: &mut State, meshes: &[Option<Mesh3D>], ui: &mut Ui) {
             .show_inside(ui, |ui| add_plots(state, ui));
     }
     show_viewport(state, combined.as_ref(), ui);
+    engine_config::show_modal(state, ui.ctx());
 }
 
 fn add_mesh_summary(meshes: &[Option<Mesh3D>], combined: &Option<Mesh3D>, ui: &mut Ui) {
@@ -879,6 +902,7 @@ fn rebuild_computer(state: &mut State, mesh: &Mesh3D) {
         material: state.material,
         time_delta_seconds: state.time_delta,
         duration_seconds: state.duration,
+        body_force: state.body_force,
     };
     let Some(mut c) = Computer3D::from_mesh(&verts_f32, &mesh.tetrahedra, cfg) else {
         return;
@@ -1120,20 +1144,29 @@ pub fn show_viewport(state: &mut State, active_mesh: Option<&Mesh3D>, ui: &mut U
         let s_min = state.stats.min_von_mises;
         let s_max = state.stats.max_von_mises.max(s_min + 1e-12);
 
-        // Per-vertex average Von Mises: build a vertex->tets incidence on
-        // the fly. Cheap relative to the per-element stress eval.
+        // Per-vertex average Von Mises plus a broken-tet flag. Vertices
+        // touching any broken tet render as cracked red so users can
+        // see fracture forming on the surface.
         let mut vm_sum = vec![0.0_f32; c.nodes.len()];
         let mut vm_count = vec![0_u32; c.nodes.len()];
+        let mut touches_broken = vec![false; c.nodes.len()];
         for e in &c.elements {
             let vm = von_mises_of(&e.stress);
             for &i in &e.indices {
                 vm_sum[i] += vm;
                 vm_count[i] += 1;
+                if e.is_broken {
+                    touches_broken[i] = true;
+                }
             }
         }
         let positions_f32: Vec<Vector3<f32>> =
             c.nodes.iter().map(|n| n.position).collect();
         let color_for = |i: usize| -> [f32; 4] {
+            if touches_broken[i] {
+                // Cracked: deep red, used as the "broken" visual marker.
+                return [0.85, 0.10, 0.10, 1.0];
+            }
             let avg = if vm_count[i] > 0 {
                 vm_sum[i] / vm_count[i] as f32
             } else {

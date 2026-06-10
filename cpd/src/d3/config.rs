@@ -9,6 +9,10 @@ pub struct Config3D {
     pub material: MaterialProps3D,
     pub time_delta_seconds: f32,
     pub duration_seconds: f32,
+    /// Constant body acceleration applied to every node (gravity / pseudo-
+    /// gravity). Force added per node per step is `mass * body_force`.
+    #[serde(default)]
+    pub body_force: [f32; 3],
 }
 
 impl Default for Config3D {
@@ -18,6 +22,7 @@ impl Default for Config3D {
             // Conservative explicit step; users can tune for stability.
             time_delta_seconds: 1.0e-5,
             duration_seconds: 1.0e-2,
+            body_force: [0.0; 3],
         }
     }
 }

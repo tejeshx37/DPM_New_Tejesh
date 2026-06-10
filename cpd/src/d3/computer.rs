@@ -145,8 +145,14 @@ impl Computer3D {
             .par_iter()
             .map(|e| e.nodal_forces())
             .collect();
+        let body_force = Vector3::new(
+            self.config.body_force[0],
+            self.config.body_force[1],
+            self.config.body_force[2],
+        );
         for n in self.nodes.iter_mut() {
-            n.force = Vector3::zeros();
+            // Body acceleration translates to per-node force = m * a.
+            n.force = body_force * n.mass;
         }
         for (element, forces) in self.elements.iter().zip(per_element_forces.iter()) {
             for (idx, f) in element.indices.iter().zip(forces.iter()) {
