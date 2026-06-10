@@ -59,6 +59,14 @@ impl OrbitCamera {
         self.distance = (self.distance * factor).clamp(1e-3, 1e6);
     }
 
+    /// Multiplicative zoom for trackpad pinch / Ctrl+scroll. `factor > 1.0`
+    /// = zoom in (camera distance decreases). Clamped like the scroll
+    /// path so a single gesture can't blow past the distance limits.
+    pub fn zoom_by(&mut self, factor: f32) {
+        let inv = (1.0 / factor as f64).clamp(0.1, 10.0);
+        self.distance = (self.distance * inv).clamp(1e-3, 1e6);
+    }
+
     /// Auto-frame the camera so the AABB fits in view.
     pub fn frame_aabb(&mut self, lo: Vector3<f64>, hi: Vector3<f64>) {
         let center = (lo + hi) * 0.5;

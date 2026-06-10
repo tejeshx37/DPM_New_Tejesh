@@ -387,9 +387,12 @@ fn handle_camera_input(camera: &mut OrbitCamera, response: &egui::Response, ui: 
         camera.pan(d.x, d.y);
     }
     if response.hovered() {
-        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+        let (scroll, pinch) = ui.input(|i| (i.smooth_scroll_delta.y, i.zoom_delta()));
         if scroll.abs() > 0.0 {
             camera.zoom(scroll);
+        }
+        if (pinch - 1.0).abs() > 1e-4 {
+            camera.zoom_by(pinch);
         }
     }
 }
