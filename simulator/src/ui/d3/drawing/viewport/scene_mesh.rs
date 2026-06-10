@@ -214,9 +214,18 @@ where
         Vec::with_capacity(mesh.boundary_faces.regions.iter().map(|r| r.faces.len()).sum::<usize>() * 3);
     for region in &mesh.boundary_faces.regions {
         for f in &region.faces {
-            let a = positions_f32[f[0]];
-            let b = positions_f32[f[1]];
-            let c = positions_f32[f[2]];
+            // Guard against a stale solver whose node array no longer
+            // matches the mesh's vertex count (mesh was regenerated
+            // without rebuilding the Computer3D). Silently skip faces
+            // that index out of range — the caller can also fall back
+            // to the reference-mesh renderer when this drift happens.
+            let (Some(&a), Some(&b), Some(&c)) = (
+                positions_f32.get(f[0]),
+                positions_f32.get(f[1]),
+                positions_f32.get(f[2]),
+            ) else {
+                continue;
+            };
             let normal = (b - a).cross(&(c - a)).normalize();
             tris.push(Vertex {
                 position: [a.x, a.y, a.z],
