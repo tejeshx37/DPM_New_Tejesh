@@ -359,6 +359,71 @@ pub fn wireframe_edges_for_mesh(
     tris
 }
 
+/// Camera-facing billboard quads, one per mesh vertex. Renders each
+/// particle as a small square so the user can see every node (interior
+/// and surface) — useful for confirming the actual particle count when
+/// the surface mesh hides the interior. `camera_right` and `camera_up`
+/// orient each quad to face the camera; `size` is the world-space side
+/// length.
+pub fn particles_for_mesh(
+    mesh: &mesh::d3::Mesh3D,
+    camera_right: Vector3<f64>,
+    camera_up: Vector3<f64>,
+    size: f64,
+    color: [f32; 4],
+) -> Vec<Vertex> {
+    let r = camera_right * (size * 0.5);
+    let u = camera_up * (size * 0.5);
+    let n = [
+        (-camera_right.cross(&camera_up).x) as f32,
+        (-camera_right.cross(&camera_up).y) as f32,
+        (-camera_right.cross(&camera_up).z) as f32,
+    ];
+    let mut tris = Vec::with_capacity(mesh.vertices.len() * 6);
+    for &p in &mesh.vertices {
+        let a = p - r - u;
+        let b = p + r - u;
+        let c = p + r + u;
+        let d = p - r + u;
+        tris.push(Vertex { position: vec3_f32(&a), normal: n, color });
+        tris.push(Vertex { position: vec3_f32(&b), normal: n, color });
+        tris.push(Vertex { position: vec3_f32(&c), normal: n, color });
+        tris.push(Vertex { position: vec3_f32(&a), normal: n, color });
+        tris.push(Vertex { position: vec3_f32(&c), normal: n, color });
+        tris.push(Vertex { position: vec3_f32(&d), normal: n, color });
+    }
+    tris
+}
+
+/// Clip a triangle stream against `axis . p >= plane_offset`. Triangles
+/// fully on the keep side are passed through; triangles with at least
+/// one vertex on the cut side are dropped (rough clipping, no per-tri
+/// splitting). Used by the Meshing page's Z-Slice toggle.
+pub fn clip_triangles_by_plane(
+    tris: &mut Vec<Vertex>,
+    axis: Vector3<f32>,
+    plane_offset: f32,
+) {
+    let mut keep = Vec::with_capacity(tris.len());
+    for chunk in tris.chunks(3) {
+        if chunk.len() < 3 {
+            continue;
+        }
+        let mut all_keep = true;
+        for v in chunk {
+            let p = nalgebra::Vector3::from(v.position);
+            if axis.dot(&p) < plane_offset {
+                all_keep = false;
+                break;
+            }
+        }
+        if all_keep {
+            keep.extend_from_slice(chunk);
+        }
+    }
+    *tris = keep;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -68,6 +68,19 @@ impl OrbitCamera {
         self.distance = (extent * 0.5) / (fov * 0.5).tan() + extent * 0.5;
     }
 
+    /// World-space camera basis: (right, up, forward). Public so the
+    /// Meshing page's "Show particles" toggle can orient billboard
+    /// quads to face the camera.
+    pub fn basis_world(&self) -> (Vector3<f64>, Vector3<f64>, Vector3<f64>) {
+        self.basis()
+    }
+
+    /// Advance yaw by an angle in radians. Used by the auto-rotate
+    /// toggle on the Meshing page.
+    pub fn rotate_yaw(&mut self, delta: f64) {
+        self.yaw += delta;
+    }
+
     /// World-space camera basis: (right, up, forward).
     fn basis(&self) -> (Vector3<f64>, Vector3<f64>, Vector3<f64>) {
         let cy = self.yaw.cos();
