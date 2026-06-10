@@ -1103,6 +1103,23 @@ fn region_color(i: usize) -> Color32 {
 }
 
 pub fn show_viewport(state: &mut State, active_mesh: Option<&Mesh3D>, ui: &mut Ui) {
+    // Stale-solver guard: if the mesh has been regenerated since the
+    // Computer3D was built (different vertex / element counts), the
+    // node positions no longer match the mesh's boundary face indices
+    // and rendering would index out of bounds. Drop the stale solver
+    // so the next Run rebuilds it against the current mesh.
+    if let (Some(c), Some(mesh)) = (state.computer.as_ref(), active_mesh) {
+        if c.nodes.len() != mesh.vertices.len() || c.elements.len() != mesh.tetrahedra.len() {
+            state.running = false;
+            state.computer = None;
+            state.stats = StressStats::default();
+            state.history.clear();
+            state.gpu_status = Some(
+                "Mesh changed — solver discarded. Click Run to rebuild.".to_string(),
+            );
+        }
+    }
+
     let available = ui.available_size();
     let size = Vec2::new(available.x.max(100.0), available.y.max(100.0));
     let (response, painter) = ui.allocate_painter(size, Sense::click_and_drag());
@@ -1288,9 +1305,12 @@ fn paint_bc_overlays(
     // Scene-size scale: use the AABB diagonal of the active vertex set so
     // arrow lengths stay proportional to the mesh, not to physical force
     // magnitudes (which vary wildly).
+    // Same stale-solver guard as in show_viewport: if the deformed
+    // positions slice doesn't cover every mesh vertex, fall back to
+    // the reference vertex instead of panicking on the indexing.
     let vertex_pos = |i: usize| -> Vector3<f64> {
         match deformed_positions {
-            Some(p) => p[i],
+            Some(p) => *p.get(i).unwrap_or(&mesh.vertices[i]),
             None => mesh.vertices[i],
         }
     };
