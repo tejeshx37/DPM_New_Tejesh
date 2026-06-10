@@ -31,7 +31,10 @@ pub struct DisplayFlags {
     pub enable_z_slice: bool,
     /// Z-slice plane offset in normalized [-1, 1] range across the mesh
     /// AABB along the +Z axis. -1 keeps everything; +1 hides everything.
-    #[serde(default)]
+    /// Serde default matches `Default::default()` so projects saved
+    /// before this field existed still deserialize with the slicer
+    /// fully open instead of cutting the mesh in half.
+    #[serde(default = "default_z_slice_offset")]
     pub z_slice_offset: f32,
     #[serde(default)]
     pub auto_rotate: bool,
@@ -55,6 +58,10 @@ impl Default for DisplayFlags {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_z_slice_offset() -> f32 {
+    -1.0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
