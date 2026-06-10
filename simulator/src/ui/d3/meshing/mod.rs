@@ -2,14 +2,60 @@
 //! a tetrahedral mesh for each supported primitive, and renders the result
 //! in the same orbit-camera viewport used by the drawing page.
 
-use egui::{Color32, ScrollArea, Sense, SidePanel, Slider, Ui, Vec2};
+use std::collections::HashMap;
+
+use egui::{Color32, ScrollArea, Sense, SidePanel, Slider, TopBottomPanel, Ui, Vec2};
 use mesh::d3::{cuboid, cylinder, sphere, Mesh3D};
+use nalgebra::Vector3;
 use serde::{Deserialize, Serialize};
 
+use super::boundary_conditions;
 use super::drawing::{
     shape::{Geometry3D, Shape3D},
     viewport::{camera::OrbitCamera, scene_mesh, wgpu_scene, ViewportState},
 };
+use super::simulation::RegionBc;
+
+/// Toggle bar at the top of the viewport, matching the reference UI:
+/// regenerate, reset view, particles, wireframe-only, z-slice,
+/// auto-rotate, hide mesh, show constraints.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DisplayFlags {
+    #[serde(default = "default_true")]
+    pub show_constraints: bool,
+    #[serde(default = "default_true")]
+    pub show_particles: bool,
+    #[serde(default)]
+    pub show_wireframe_only: bool,
+    #[serde(default)]
+    pub enable_z_slice: bool,
+    /// Z-slice plane offset in normalized [-1, 1] range across the mesh
+    /// AABB along the +Z axis. -1 keeps everything; +1 hides everything.
+    #[serde(default)]
+    pub z_slice_offset: f32,
+    #[serde(default)]
+    pub auto_rotate: bool,
+    #[serde(default)]
+    pub hide_mesh: bool,
+}
+
+impl Default for DisplayFlags {
+    fn default() -> Self {
+        Self {
+            show_constraints: true,
+            show_particles: true,
+            show_wireframe_only: false,
+            enable_z_slice: false,
+            z_slice_offset: -1.0,
+            auto_rotate: false,
+            hide_mesh: false,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct State {
@@ -30,6 +76,8 @@ pub struct State {
     /// Last error message from mesh generation, if any.
     #[serde(default)]
     pub error: Option<String>,
+    #[serde(default)]
+    pub display: DisplayFlags,
 }
 
 fn default_subdivisions() -> u32 {
@@ -44,6 +92,7 @@ impl Default for State {
             meshes: Vec::new(),
             viewport: ViewportState::default(),
             error: None,
+            display: DisplayFlags::default(),
         }
     }
 }
@@ -58,7 +107,17 @@ fn subdivisions_from_particle_count(count: u32) -> u32 {
     n.saturating_sub(1).max(1).min(60)
 }
 
-pub fn show(state: &mut State, geometry: &Geometry3D, ui: &mut Ui) {
+pub fn show(
+    state: &mut State,
+    geometry: &Geometry3D,
+    region_bcs: &HashMap<String, RegionBc>,
+    ui: &mut Ui,
+) {
+    // Top toolbar with the feature toggles users expect from comparable
+    // mesher UIs (reference image in chat).
+    TopBottomPanel::top("d3_meshing_toolbar")
+        .show_inside(ui, |ui| add_toolbar(state, geometry, ui));
+
     SidePanel::right("d3_meshing_side_panel")
         .resizable(true)
         .default_width(240.0)
@@ -158,6 +217,14 @@ pub fn show(state: &mut State, geometry: &Geometry3D, ui: &mut Ui) {
 
     handle_camera_input(&mut state.viewport.camera, &response, ui);
 
+    // Auto-rotate: increment yaw a fixed amount per frame, ask egui for
+    // a continuous repaint. Suppressed while the user is actively
+    // dragging the camera.
+    if state.display.auto_rotate && !response.dragged() {
+        state.viewport.camera.rotate_yaw(0.005);
+        ui.ctx().request_repaint();
+    }
+
     painter.rect_filled(rect, 0.0, Color32::from_gray(20));
 
     let view_proj = state
@@ -174,23 +241,58 @@ pub fn show(state: &mut State, geometry: &Geometry3D, ui: &mut Ui) {
     // Edge thickness adapts to camera distance so edges stay visible.
     let cam_dist = state.viewport.camera.distance();
     let edge_thickness = cam_dist * 0.003;
+    let particle_size = cam_dist * 0.004;
 
-    // Per-body colors: faint fill + bright wireframe edge.
-    let body_colors: &[([f32; 4], [f32; 4])] = &[
-        ([0.30, 0.50, 0.70, 0.12], [0.40, 0.75, 1.00, 1.0]),  // blue
-        ([0.70, 0.40, 0.40, 0.12], [1.00, 0.55, 0.55, 1.0]),  // red
-        ([0.40, 0.65, 0.45, 0.12], [0.55, 1.00, 0.70, 1.0]),  // green
-        ([0.70, 0.60, 0.35, 0.12], [1.00, 0.85, 0.45, 1.0]),  // yellow
+    // Per-body colors: faint fill + bright wireframe edge + particle dot.
+    let body_colors: &[([f32; 4], [f32; 4], [f32; 4])] = &[
+        ([0.30, 0.50, 0.70, 0.12], [0.40, 0.75, 1.00, 1.0], [1.00, 0.78, 0.30, 1.0]),
+        ([0.70, 0.40, 0.40, 0.12], [1.00, 0.55, 0.55, 1.0], [1.00, 0.85, 0.40, 1.0]),
+        ([0.40, 0.65, 0.45, 0.12], [0.55, 1.00, 0.70, 1.0], [1.00, 0.90, 0.55, 1.0]),
+        ([0.70, 0.60, 0.35, 0.12], [1.00, 0.85, 0.45, 1.0], [0.90, 0.95, 0.45, 1.0]),
     ];
 
+    let (cam_right, cam_up, _cam_fwd) = state.viewport.camera.basis_world();
+
     for (idx, mesh) in state.meshes.iter().flatten().enumerate() {
-        let (fill_color, edge_color) = body_colors[idx % body_colors.len()];
+        let (fill_color, edge_color, particle_color) = body_colors[idx % body_colors.len()];
 
-        // Faint solid fill for depth context.
-        all_verts.extend(scene_mesh::triangles_for_mesh(mesh, |_| fill_color));
+        // Filled surface — skipped if user wants wireframe-only or
+        // hid the mesh entirely.
+        if !state.display.hide_mesh && !state.display.show_wireframe_only {
+            all_verts.extend(scene_mesh::triangles_for_mesh(mesh, |_| fill_color));
+        }
+        // Wireframe edges — visible unless mesh is fully hidden.
+        if !state.display.hide_mesh {
+            all_verts.extend(scene_mesh::wireframe_edges_for_mesh(
+                mesh,
+                edge_color,
+                edge_thickness,
+            ));
+        }
+        // Particles — every mesh vertex as a small camera-facing quad.
+        if state.display.show_particles {
+            all_verts.extend(scene_mesh::particles_for_mesh(
+                mesh,
+                cam_right,
+                cam_up,
+                particle_size,
+                particle_color,
+            ));
+        }
+    }
 
-        // Bright wireframe edge quads.
-        all_verts.extend(scene_mesh::wireframe_edges_for_mesh(mesh, edge_color, edge_thickness));
+    // Z-Slice: clip the assembled triangle stream against a plane along
+    // +Z anchored to the mesh AABB.
+    if state.display.enable_z_slice && !all_verts.is_empty() {
+        let (lo, hi) = combined_aabb(&state.meshes);
+        let z_lo = lo.z as f32;
+        let z_hi = hi.z as f32;
+        let offset = z_lo + (state.display.z_slice_offset * 0.5 + 0.5) * (z_hi - z_lo);
+        scene_mesh::clip_triangles_by_plane(
+            &mut all_verts,
+            Vector3::new(0.0, 0.0, 1.0),
+            offset,
+        );
     }
 
     if !all_verts.is_empty() {
@@ -199,18 +301,66 @@ pub fn show(state: &mut State, geometry: &Geometry3D, ui: &mut Ui) {
         painter.add(eframe::egui_wgpu::Callback::new_paint_callback(rect, cb));
     }
 
+    // Constraint overlay arrows on top of the wgpu scene.
+    if state.display.show_constraints {
+        boundary_conditions::paint_constraint_overlays(
+            &painter, rect, &view_proj, geometry, region_bcs,
+        );
+    }
+
+    // Stats HUD matching the reference UI layout: "Elements: N   Points: N".
+    let total_tets: usize = state.meshes.iter().flatten().map(|m| m.tet_count()).sum();
+    let total_verts: usize = state.meshes.iter().flatten().map(|m| m.vertex_count()).sum();
     let hud = format!(
-        "{} tets across {} mesh(es)  |  LMB rotate  RMB pan  scroll zoom",
-        state.meshes.iter().flatten().map(|m| m.tet_count()).sum::<usize>(),
-        state.meshes.iter().flatten().count()
+        "Elements: {}   Points: {}   |   LMB rotate · RMB pan · scroll/+/- zoom",
+        total_tets, total_verts
     );
     painter.text(
-        rect.left_top() + Vec2::new(8.0, 8.0),
-        egui::Align2::LEFT_TOP,
+        rect.left_bottom() + Vec2::new(8.0, -22.0),
+        egui::Align2::LEFT_BOTTOM,
         hud,
         egui::FontId::monospace(11.0),
-        Color32::from_gray(180),
+        Color32::from_gray(190),
     );
+}
+
+/// AABB of every populated mesh, for the Z-slice plane anchoring.
+fn combined_aabb(meshes: &[Option<Mesh3D>]) -> (Vector3<f64>, Vector3<f64>) {
+    let mut lo = Vector3::repeat(f64::INFINITY);
+    let mut hi = Vector3::repeat(f64::NEG_INFINITY);
+    for mesh in meshes.iter().flatten() {
+        for v in &mesh.vertices {
+            lo = lo.inf(v);
+            hi = hi.sup(v);
+        }
+    }
+    if !lo.x.is_finite() {
+        lo = Vector3::repeat(0.0);
+        hi = Vector3::repeat(1.0);
+    }
+    (lo, hi)
+}
+
+fn add_toolbar(state: &mut State, geometry: &Geometry3D, ui: &mut Ui) {
+    ui.horizontal_wrapped(|ui| {
+        if ui.button("⟳ Regenerate mesh").clicked() {
+            regenerate(state, geometry);
+        }
+        if ui.button("⌖ Reset view").clicked() {
+            state.viewport.auto_frame = true;
+        }
+        ui.separator();
+        ui.checkbox(&mut state.display.show_constraints, "Show constraints");
+        ui.checkbox(&mut state.display.show_particles, "Show particles");
+        ui.checkbox(&mut state.display.show_wireframe_only, "Show wireframe only");
+        ui.checkbox(&mut state.display.enable_z_slice, "Enable Z-Slice");
+        ui.checkbox(&mut state.display.auto_rotate, "Auto-Rotate 360°");
+        ui.checkbox(&mut state.display.hide_mesh, "Hide mesh");
+        if state.display.enable_z_slice {
+            ui.label("slice:");
+            ui.add(Slider::new(&mut state.display.z_slice_offset, -1.0..=1.0).show_value(false));
+        }
+    });
 }
 
 fn handle_camera_input(camera: &mut OrbitCamera, response: &egui::Response, ui: &mut Ui) {

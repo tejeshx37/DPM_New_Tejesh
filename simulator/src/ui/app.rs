@@ -887,7 +887,13 @@ impl App {
                     }
                     d3::Stage::Meshing => {
                         let geometry = page_data.d3_state.drawing.geometry.clone();
-                        d3::meshing::show(&mut page_data.d3_state.meshing, &geometry, ui);
+                        let region_bcs = page_data.d3_state.simulation.region_bcs.clone();
+                        d3::meshing::show(
+                            &mut page_data.d3_state.meshing,
+                            &geometry,
+                            &region_bcs,
+                            ui,
+                        );
                     }
                     d3::Stage::Simulation => {
                         let meshes = page_data.d3_state.meshing.meshes.clone();

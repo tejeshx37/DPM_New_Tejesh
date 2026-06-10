@@ -30,6 +30,38 @@ fn region_key(shape_index: usize, region: &str) -> String {
     format!("body{}/{}", shape_index + 1, region)
 }
 
+/// Paint BC marker arrows / pinned bars for every region in the
+/// geometry that has a configured BC. Shared by the BC page (which
+/// passes its own viewport rect / view-projection) and the Meshing
+/// page's "Show constraints" toggle.
+pub fn paint_constraint_overlays(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    view_proj: &nalgebra::Matrix4<f64>,
+    geometry: &Geometry3D,
+    region_bcs: &std::collections::HashMap<String, RegionBc>,
+) {
+    let (lo, hi) = geometry.aabb();
+    let scene_scale = (hi - lo).norm().max(1e-6);
+    let arrow_len = scene_scale * 0.18;
+    for (idx, (shape, _op)) in geometry.shapes.iter().enumerate() {
+        let (s_lo, s_hi) = shape.aabb();
+        for region_name in shape.region_names() {
+            let key = region_key(idx, region_name);
+            let Some(bc) = region_bcs.get(&key) else {
+                continue;
+            };
+            if matches!(bc.kind, BcKind::Free) {
+                continue;
+            }
+            let normal = region_outward_normal(region_name);
+            let centroid = region_centroid(s_lo, s_hi, region_name);
+            let base = centroid + normal * scene_scale * 0.02;
+            paint_bc_marker(painter, rect, view_proj, bc, base, normal, arrow_len, &key);
+        }
+    }
+}
+
 pub fn show(sim_state: &mut simulation::State, geometry: &Geometry3D, ui: &mut Ui) {
     SidePanel::right("d3_bc_side_panel")
         .resizable(true)
