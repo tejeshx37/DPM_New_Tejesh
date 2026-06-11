@@ -118,6 +118,12 @@ pub struct State {
     /// propagating through the body, not just on the surface.
     #[serde(default = "default_true")]
     pub sim_show_particles: bool,
+    /// Fingerprint of `region_bcs` at the moment the active `Computer3D`
+    /// was built. Used by the BC page to detect that the user edited
+    /// something and drop the now-stale solver so the next Run picks
+    /// up the new boundary conditions. Not persisted.
+    #[serde(skip)]
+    pub bcs_fingerprint_at_build: u64,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -270,8 +276,30 @@ impl Default for State {
             body_force: [0.0; 3],
             auto_export: false,
             sim_show_particles: true,
+            bcs_fingerprint_at_build: 0,
         }
     }
+}
+
+/// Quick-and-dirty checksum of every BC entry so the BC page can detect
+/// a user edit between frames and invalidate the cached solver. Sorts
+/// keys so the fingerprint is independent of HashMap iteration order.
+pub fn region_bcs_fingerprint(map: &HashMap<String, RegionBc>) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    let mut keys: Vec<&String> = map.keys().collect();
+    keys.sort();
+    for k in keys {
+        k.hash(&mut h);
+        let v = &map[k];
+        (v.kind as u8).hash(&mut h);
+        (v.axes.x, v.axes.y, v.axes.z).hash(&mut h);
+        v.force.map(|x| x.to_bits()).hash(&mut h);
+        v.displacement.map(|x| x.to_bits()).hash(&mut h);
+        v.ramp_seconds.to_bits().hash(&mut h);
+    }
+    h.finish()
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -867,10 +895,30 @@ fn vec_row(ui: &mut Ui, label: &str, v: &mut [f32; 3]) {
 fn add_run_controls(state: &mut State, mesh: &Mesh3D, ui: &mut Ui) {
     ui.horizontal(|ui| {
         if ui.button(if state.running { "Pause" } else { "Run" }).clicked() {
-            if state.computer.is_none() {
-                rebuild_computer(state, mesh);
+            if state.running {
+                state.running = false;
+            } else {
+                // Run / Resume. Rebuild when:
+                //   - no solver yet
+                //   - solver finished a prior run
+                //   - engine-config values changed since the build
+                //     (material, dt, duration, body_force)
+                // Otherwise resume the paused solver in place.
+                let bcs_now = region_bcs_fingerprint(&state.region_bcs);
+                let needs_build = state.computer.as_ref().map_or(true, |c| {
+                    c.iterations >= c.config.total_steps()
+                        || c.config.material != state.material
+                        || c.config.time_delta_seconds != state.time_delta
+                        || c.config.duration_seconds != state.duration
+                        || c.config.body_force != state.body_force
+                        || bcs_now != state.bcs_fingerprint_at_build
+                });
+                if needs_build {
+                    state.history.clear();
+                    rebuild_computer(state, mesh);
+                }
+                state.running = state.computer.is_some();
             }
-            state.running = !state.running;
         }
         if ui.button("Reset").clicked() {
             state.running = false;
@@ -948,17 +996,43 @@ fn rebuild_computer(state: &mut State, mesh: &Mesh3D) {
     }
     state.computer = Some(c);
     state.stats = StressStats::default();
+    state.bcs_fingerprint_at_build = region_bcs_fingerprint(&state.region_bcs);
 }
 
 fn add_stats(state: &State, ui: &mut Ui) {
     ui.separator();
     if let Some(c) = state.computer.as_ref() {
-        ui.label(format!("Time: {:.5} s", c.time()));
-        ui.label(format!("Iterations: {}", c.iterations));
+        let total = c.config.total_steps();
+        ui.label(format!(
+            "Time: {:.5} s   ({}/{} steps)",
+            c.time(),
+            c.iterations,
+            total
+        ));
+        let broken = c.elements.iter().filter(|e| e.is_broken).count();
+        ui.label(format!(
+            "Broken elements: {} / {}",
+            broken,
+            c.elements.len()
+        ));
         ui.label(format!(
             "Von Mises stress  min/mean/max:  {:.3e} / {:.3e} / {:.3e}",
             state.stats.min_von_mises, state.stats.mean_von_mises, state.stats.max_von_mises
         ));
+        // Flag config drift so the user knows the next Run will rebuild
+        // the solver to pick up their changes.
+        let bcs_now = region_bcs_fingerprint(&state.region_bcs);
+        let drift = c.config.material != state.material
+            || c.config.time_delta_seconds != state.time_delta
+            || c.config.duration_seconds != state.duration
+            || c.config.body_force != state.body_force
+            || bcs_now != state.bcs_fingerprint_at_build;
+        if drift {
+            ui.colored_label(
+                Color32::from_rgb(255, 160, 100),
+                "Settings changed — next Run will rebuild the solver.",
+            );
+        }
     } else {
         ui.label("Solver not built. Click Run to initialize.");
     }
