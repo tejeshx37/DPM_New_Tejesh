@@ -284,6 +284,8 @@ impl Default for State {
 /// Quick-and-dirty checksum of every BC entry so the BC page can detect
 /// a user edit between frames and invalidate the cached solver. Sorts
 /// keys so the fingerprint is independent of HashMap iteration order.
+/// Covers every field that can drive the solver, including the
+/// `time_profile` keyframes used by TimeForce / TimeDisplacement BCs.
 pub fn region_bcs_fingerprint(map: &HashMap<String, RegionBc>) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -298,6 +300,15 @@ pub fn region_bcs_fingerprint(map: &HashMap<String, RegionBc>) -> u64 {
         v.force.map(|x| x.to_bits()).hash(&mut h);
         v.displacement.map(|x| x.to_bits()).hash(&mut h);
         v.ramp_seconds.to_bits().hash(&mut h);
+        // Keyframes per axis for TimeForce / TimeDisplacement so a
+        // keyframe edit forces a rebuild on the next Run.
+        for series in [&v.time_profile.x, &v.time_profile.y, &v.time_profile.z] {
+            series.points.len().hash(&mut h);
+            for (t, val) in &series.points {
+                t.to_bits().hash(&mut h);
+                val.to_bits().hash(&mut h);
+            }
+        }
     }
     h.finish()
 }
