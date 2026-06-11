@@ -124,6 +124,10 @@ pub struct State {
     /// up the new boundary conditions. Not persisted.
     #[serde(skip)]
     pub bcs_fingerprint_at_build: u64,
+    /// Transient confirmation after a preset is applied in Engine Config.
+    /// Holds the preset name for one frame, then `take()`d and displayed.
+    #[serde(skip)]
+    pub preset_just_applied: Option<&'static str>,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -277,6 +281,7 @@ impl Default for State {
             auto_export: false,
             sim_show_particles: true,
             bcs_fingerprint_at_build: 0,
+            preset_just_applied: None,
         }
     }
 }
@@ -1012,6 +1017,24 @@ fn rebuild_computer(state: &mut State, mesh: &Mesh3D) {
 
 fn add_stats(state: &State, ui: &mut Ui) {
     ui.separator();
+
+    // ── Fracture status line (always visible) ──────────────────────
+    let fc = state.material.failure_criteria();
+    let fracture_enabled = fc.strain_energy.is_some()
+        || fc.tensional_stress.is_some()
+        || fc.compressional_stress.is_some();
+    ui.colored_label(
+        if fracture_enabled {
+            Color32::from_rgb(120, 220, 120)
+        } else {
+            Color32::from_rgb(255, 160, 100)
+        },
+        if fracture_enabled {
+            "Fracture: ✓ enabled"
+        } else {
+            "Fracture: ✗ no failure criteria configured"
+        },
+    );
     if let Some(c) = state.computer.as_ref() {
         let total = c.config.total_steps();
         ui.label(format!(

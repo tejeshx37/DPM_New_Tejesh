@@ -10,7 +10,7 @@
 //! look up moduli and densities every time they spin up a new sim.
 
 use cpd::d3::{BulkProps3D, FailureCriteria3D, IsotropicProps3D, MaterialProps3D, OrthotropicProps3D};
-use egui::{ComboBox, Context, DragValue, Slider, Ui};
+use egui::{Color32, ComboBox, Context, DragValue, Slider, Ui};
 
 use super::State;
 
@@ -92,6 +92,33 @@ pub fn show_modal(state: &mut State, ctx: &Context) {
 
 fn add_body(state: &mut State, ui: &mut Ui) {
     egui::ScrollArea::vertical().show(ui, |ui| {
+        // ── Top-of-dialog fracture status banner ──────────────────────
+        let fc = state.material.failure_criteria();
+        let fracture_enabled = fc.strain_energy.is_some()
+            || fc.tensional_stress.is_some()
+            || fc.compressional_stress.is_some();
+        if fracture_enabled {
+            ui.colored_label(
+                Color32::from_rgb(120, 220, 120),
+                "✓ Failure criteria active — fracture can occur",
+            );
+        } else {
+            ui.colored_label(
+                Color32::from_rgb(255, 160, 100),
+                "⚠ No failure criteria — fracture is disabled. Pick a preset or tick a threshold below.",
+            );
+        }
+
+        // ── Preset-just-applied confirmation ──────────────────────────
+        if let Some(name) = state.preset_just_applied.take() {
+            ui.colored_label(
+                Color32::from_rgb(120, 220, 120),
+                format!("Applied {name} — failure criteria, density, damping, E, ν and Δt all set."),
+            );
+        }
+
+        ui.add_space(4.0);
+
         ui.group(|ui| {
             ui.label("Time / forcing");
             two_col(ui, "Duration (s)", |ui| {
@@ -146,6 +173,8 @@ fn add_body(state: &mut State, ui: &mut Ui) {
                         if let Ok(parsed) = dt.parse::<f32>() {
                             state.time_delta = parsed;
                         }
+                        state.preset_just_applied = Some(name);
+                        ui.ctx().request_repaint();
                     }
                 }
             });
@@ -175,6 +204,24 @@ fn add_body(state: &mut State, ui: &mut Ui) {
                     });
                 }
             });
+
+            // ── Material-section fracture status ─────────────────────
+            let fc = state.material.failure_criteria();
+            let fracture_on = fc.strain_energy.is_some()
+                || fc.tensional_stress.is_some()
+                || fc.compressional_stress.is_some();
+            if fracture_on {
+                ui.colored_label(
+                    Color32::from_rgb(120, 220, 120),
+                    "✓ Fracture thresholds set",
+                );
+            } else {
+                ui.colored_label(
+                    Color32::from_rgb(255, 160, 100),
+                    "⚠ No thresholds — tick at least one below to enable fracture",
+                );
+            }
+            ui.add_space(2.0);
 
             match &mut state.material {
                 MaterialProps3D::Isotropic(p) => {
