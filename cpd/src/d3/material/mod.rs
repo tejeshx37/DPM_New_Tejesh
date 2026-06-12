@@ -79,4 +79,17 @@ impl MaterialProps3D {
             Self::Orthotropic(p) => p.eval_stress(strain),
         }
     }
+
+    /// Longitudinal wave speed √(E/ρ). Used for CFL limit estimates.
+    pub fn sound_speed(&self) -> f32 {
+        let e = match self {
+            Self::Isotropic(p) => p.elasticity_modulus,
+            Self::Orthotropic(p) => {
+                p.elasticity_modulus_x
+                    .max(p.elasticity_modulus_y)
+                    .max(p.elasticity_modulus_z)
+            }
+        };
+        (e / self.density()).sqrt()
+    }
 }

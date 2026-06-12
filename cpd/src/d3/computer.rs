@@ -236,6 +236,14 @@ impl Computer3D {
         self.iterations += 1;
     }
 
+    /// Returns `true` if any node position contains NaN. The caller can
+    /// use this to detect divergence and stop the run early.
+    pub fn has_nan_positions(&self) -> bool {
+        self.nodes.iter().any(|n| {
+            n.position.x.is_nan() || n.position.y.is_nan() || n.position.z.is_nan()
+        })
+    }
+
     /// Mean displacement (current − initial) and mean force across a set of
     /// node indices. Used by the simulator UI to record per-region time
     /// series for plotting load-displacement curves.

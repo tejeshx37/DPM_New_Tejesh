@@ -124,6 +124,17 @@ pub struct State {
     /// up the new boundary conditions. Not persisted.
     #[serde(skip)]
     pub bcs_fingerprint_at_build: u64,
+    /// Snapshot of `use_gpu_stresses` at build time. Compared on Run
+    /// to detect drift when the user toggles the GPU checkbox.
+    #[serde(skip)]
+    pub use_gpu_at_build: bool,
+    /// Guards against duplicate auto-export within a single run.
+    #[serde(skip)]
+    pub already_exported_this_run: bool,
+    /// Peak Von Mises observed during the current run, for display
+    /// alongside failure thresholds so users can judge proximity.
+    #[serde(skip)]
+    pub peak_von_mises: f32,
     /// Transient confirmation after a preset is applied in Engine Config.
     /// Holds the preset name for one frame, then `take()`d and displayed.
     #[serde(skip)]
@@ -281,6 +292,9 @@ impl Default for State {
             auto_export: false,
             sim_show_particles: true,
             bcs_fingerprint_at_build: 0,
+            use_gpu_at_build: false,
+            already_exported_this_run: false,
+            peak_von_mises: 0.0,
             preset_just_applied: None,
         }
     }
@@ -522,8 +536,38 @@ pub fn show(
                 }
             }
             state.stats = c.stress_stats();
+            if state.stats.max_von_mises > state.peak_von_mises {
+                state.peak_von_mises = state.stats.max_von_mises;
+            }
+            // NaN sentinel: stop immediately if the integrator diverged.
+            if c.has_nan_positions() {
+                state.running = false;
+                state.last_export_status = Some(format!(
+                    "Simulation diverged at step {} — reduce Δt or damping",
+                    c.iterations
+                ));
+            }
             if c.time() >= state.duration {
                 state.running = false;
+                // Auto-export when duration is reached.
+                if state.auto_export && !state.already_exported_this_run {
+                    state.already_exported_this_run = true;
+                    let dir = state
+                        .last_export_dir
+                        .clone()
+                        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+                    let report = export::export(state, combined.as_ref(), &dir);
+                    if let Some(err) = report.error {
+                        state.last_export_status = Some(format!("Auto-export failed: {err}"));
+                    } else {
+                        state.last_export_status = Some(format!(
+                            "Auto-exported {} files to {}",
+                            report.files.len(),
+                            dir.display()
+                        ));
+                        state.last_export_dir = Some(dir);
+                    }
+                }
             }
         }
         ui.ctx().request_repaint();
@@ -693,13 +737,16 @@ fn add_integration_controls(state: &mut State, ui: &mut Ui) {
             egui::Checkbox::new(&mut state.use_gpu_stresses, "GPU strain/stress (E18)"),
         );
         if !supports_gpu {
+            if state.use_gpu_stresses {
+                state.gpu_status = None;
+            }
             state.use_gpu_stresses = false;
             let reason = if !matches!(state.material, MaterialProps3D::Isotropic(_)) {
-                "(isotropic only for now)"
+                "GPU disabled: isotropic material only"
             } else {
-                "(disabled while failure criteria are configured)"
+                "GPU disabled: failure criteria active"
             };
-            ui.label(reason);
+            ui.colored_label(Color32::from_rgb(255, 160, 100), reason);
         }
     });
     if state.use_gpu_stresses {
@@ -928,6 +975,7 @@ fn add_run_controls(state: &mut State, mesh: &Mesh3D, ui: &mut Ui) {
                         || c.config.duration_seconds != state.duration
                         || c.config.body_force != state.body_force
                         || bcs_now != state.bcs_fingerprint_at_build
+                        || state.use_gpu_stresses != state.use_gpu_at_build
                 });
                 if needs_build {
                     state.history.clear();
@@ -942,6 +990,8 @@ fn add_run_controls(state: &mut State, mesh: &Mesh3D, ui: &mut Ui) {
                 c.reset();
                 state.stats = StressStats::default();
                 state.history.clear();
+                state.peak_von_mises = 0.0;
+                state.already_exported_this_run = false;
             }
         }
         if ui.button("Rebuild").clicked() {
@@ -1013,6 +1063,11 @@ fn rebuild_computer(state: &mut State, mesh: &Mesh3D) {
     state.computer = Some(c);
     state.stats = StressStats::default();
     state.bcs_fingerprint_at_build = region_bcs_fingerprint(&state.region_bcs);
+    state.use_gpu_at_build = state.use_gpu_stresses;
+    state.already_exported_this_run = false;
+    state.peak_von_mises = 0.0;
+    // Clear stale GPU status on rebuild.
+    state.gpu_status = None;
 }
 
 fn add_stats(state: &State, ui: &mut Ui) {
@@ -1053,6 +1108,26 @@ fn add_stats(state: &State, ui: &mut Ui) {
             "Von Mises stress  min/mean/max:  {:.3e} / {:.3e} / {:.3e}",
             state.stats.min_von_mises, state.stats.mean_von_mises, state.stats.max_von_mises
         ));
+        // Show peak VM vs failure threshold so users can judge how close
+        // the run got to fracture.
+        if fracture_enabled && state.peak_von_mises > 0.0 {
+            let threshold = fc.tensional_stress.unwrap_or(f32::INFINITY);
+            let ratio = state.peak_von_mises / threshold;
+            let label = format!(
+                "Peak VM: {:.3e} Pa  (σ_t = {:.3e} Pa, {:.0}%)",
+                state.peak_von_mises,
+                threshold,
+                ratio * 100.0,
+            );
+            let color = if ratio >= 1.0 {
+                Color32::from_rgb(120, 220, 120)
+            } else if ratio >= 0.5 {
+                Color32::from_rgb(255, 220, 100)
+            } else {
+                Color32::from_rgb(255, 160, 100)
+            };
+            ui.colored_label(color, label);
+        }
         // Flag config drift so the user knows the next Run will rebuild
         // the solver to pick up their changes.
         let bcs_now = region_bcs_fingerprint(&state.region_bcs);
@@ -1060,7 +1135,8 @@ fn add_stats(state: &State, ui: &mut Ui) {
             || c.config.time_delta_seconds != state.time_delta
             || c.config.duration_seconds != state.duration
             || c.config.body_force != state.body_force
-            || bcs_now != state.bcs_fingerprint_at_build;
+            || bcs_now != state.bcs_fingerprint_at_build
+            || state.use_gpu_stresses != state.use_gpu_at_build;
         if drift {
             ui.colored_label(
                 Color32::from_rgb(255, 160, 100),
@@ -1255,6 +1331,7 @@ pub fn show_viewport(state: &mut State, active_mesh: Option<&Mesh3D>, ui: &mut U
             state.gpu_status = Some(
                 "Mesh changed — solver discarded. Click Run to rebuild.".to_string(),
             );
+            state.viewport.auto_frame = true;
         }
     }
 

@@ -16,6 +16,8 @@ mod config;
 mod element;
 mod material;
 mod node;
+#[cfg(test)]
+mod test_nan_explosion;
 
 pub use boundary_condition::{Axis, AxisTimeSeries, BoundaryCondition3D, TimeSeries};
 pub use computer::{run_steps, Computer3D, RegionAverages, StressStats};
