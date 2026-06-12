@@ -3,6 +3,8 @@ mod ui;
 
 use eframe::NativeOptions;
 use egui::ViewportBuilder;
+use egui_wgpu;
+use wgpu;
 use puffin_http::Server;
 use serde::{Deserialize, Serialize};
 use std::process::{Child, Command};
@@ -28,6 +30,11 @@ fn main() -> eframe::Result<()> {
             viewport: ViewportBuilder::default().with_app_id(APP_ID),
             persist_window: false,
             renderer: eframe::Renderer::Wgpu,
+            wgpu_options: egui_wgpu::WgpuConfiguration {
+                present_mode: wgpu::PresentMode::AutoVsync,
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                ..Default::default()
+            },
             ..Default::default()
         },
         Box::new(|cc| Box::new(App::new(cc))),

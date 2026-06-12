@@ -290,20 +290,13 @@ impl GpuStressKernel {
     }
 
     /// True when the GPU kernel can safely replace the CPU strain/stress
-    /// phase for this material. The GPU shader currently:
-    ///   * handles isotropic only (no 6×6 Voigt path yet)
-    ///   * does not update `Element3D::strain_energy` or `is_broken`, so
-    ///     any active failure threshold would silently be inert
-    /// Both gates are checked here; the UI uses the result to enable or
-    /// disable the toggle.
+    /// phase for this material. The GPU shader currently handles
+    /// isotropic only (no 6×6 Voigt path yet). Failure criteria are
+    /// evaluated in a lightweight CPU post-pass
+    /// ([`Computer3D::apply_external_stresses_with_failure`]) so they
+    /// do not gate GPU eligibility.
     pub fn supports(material: &MaterialProps3D) -> bool {
-        if !matches!(material, MaterialProps3D::Isotropic(_)) {
-            return false;
-        }
-        let fc = material.failure_criteria();
-        fc.strain_energy.is_none()
-            && fc.tensional_stress.is_none()
-            && fc.compressional_stress.is_none()
+        matches!(material, MaterialProps3D::Isotropic(_))
     }
 
     /// Compute per-element stresses on the GPU from `computer`'s current
