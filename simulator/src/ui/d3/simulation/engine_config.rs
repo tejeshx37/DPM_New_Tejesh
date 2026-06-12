@@ -277,6 +277,12 @@ fn add_body(state: &mut State, ui: &mut Ui) {
                         .clamp_range(0.0..=f32::MAX),
                 );
             });
+            if fracture_on && bulk.damping > 100.0 {
+                ui.colored_label(
+                    Color32::from_rgb(255, 220, 100),
+                    "High damping suppresses fracture — try ≤ 50 for metals",
+                );
+            }
             optional_field(ui, "Failure strain energy (J/m³)", &mut bulk.failure_criteria.strain_energy, 1e3, 0.0);
             optional_field(ui, "Failure tensional stress (Pa)", &mut bulk.failure_criteria.tensional_stress, 1e6, 0.0);
             optional_field(ui, "Failure compressional stress (Pa)", &mut bulk.failure_criteria.compressional_stress, 1e6, 0.0);
@@ -295,9 +301,18 @@ fn add_body(state: &mut State, ui: &mut Ui) {
                         .max_decimals(9),
                 );
             });
-            // Adaptive time-stepping deferred — explicit Verlet doesn't
-            // adapt without bigger changes; surfacing as a placeholder
-            // would mislead the user. Note the future plan instead.
+            let c_sound = state.material.sound_speed();
+            if c_sound.is_finite() && c_sound > 0.0 {
+                let label = format!("Sound speed c = √(E/ρ) ≈ {c_sound:.1} m/s");
+                ui.label(label);
+                let warn = state.time_delta * c_sound > 0.1;
+                if warn {
+                    ui.colored_label(
+                        Color32::from_rgb(255, 160, 100),
+                        "⚠ Δt may exceed CFL limit for your mesh — reduce Δt or increase mesh resolution",
+                    );
+                }
+            }
             ui.label("Adaptive time stepping: planned. Pick Δt below the material's CFL limit (≈ h/c).");
         });
 
