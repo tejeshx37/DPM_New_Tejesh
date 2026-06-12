@@ -131,6 +131,67 @@ impl Computer3D {
         }
     }
 
+    /// Overwrite per-element stresses from an external buffer (e.g. a
+    /// GPU compute kernel), then run a lightweight CPU post-pass that
+    /// recomputes strain and strain energy from the current node
+    /// positions and checks failure criteria. This is much cheaper than
+    /// the full CPU stress path because the constitutive-law evaluation
+    /// is skipped — only the geometric strain and the energy double-
+    /// contraction are computed.
+    ///
+    /// Panics if `stresses.len() != self.elements.len()`.
+    pub fn apply_external_stresses_with_failure(&mut self, stresses: &[Matrix3<f32>]) {
+        assert_eq!(
+            stresses.len(),
+            self.elements.len(),
+            "apply_external_stresses_with_failure: expected {} stresses (one per element), got {}",
+            self.elements.len(),
+            stresses.len(),
+        );
+
+        let material = self.config.material;
+        let fc = material.failure_criteria();
+        let node_positions: Vec<Vector3<f32>> = self.nodes.iter().map(|n| n.position).collect();
+
+        self.elements
+            .par_iter_mut()
+            .zip(stresses.par_iter())
+            .for_each(|(e, s)| {
+                // Apply the GPU-computed stress.
+                e.stress = *s;
+
+                // Recompute Green-Lagrange strain from current positions.
+                let positions = [
+                    node_positions[e.indices[0]],
+                    node_positions[e.indices[1]],
+                    node_positions[e.indices[2]],
+                    node_positions[e.indices[3]],
+                ];
+                let d_ba = positions[1] - positions[0];
+                let d_ca = positions[2] - positions[0];
+                let d_da = positions[3] - positions[0];
+                let d = Matrix3::from_columns(&[d_ba, d_ca, d_da]);
+                let f = d * e.ref_inv;
+                let identity = Matrix3::identity();
+                e.strain = (f.transpose() * f - identity) * 0.5;
+
+                // Strain energy via stress:strain double contraction.
+                e.strain_energy = 0.5
+                    * (e.stress.m11 * e.strain.m11
+                        + e.stress.m22 * e.strain.m22
+                        + e.stress.m33 * e.strain.m33
+                        + 2.0
+                            * (e.stress.m12 * e.strain.m12
+                                + e.stress.m13 * e.strain.m13
+                                + e.stress.m23 * e.strain.m23));
+
+                // Failure check.
+                if fc.satisfies(e.strain_energy, &e.stress) {
+                    e.is_broken = true;
+                }
+            });
+    }
+
     /// Force-assembly + integration phase. Assumes stresses are already
     /// up to date on each element (either via
     /// [`Computer3D::update_strain_stress_cpu`] or

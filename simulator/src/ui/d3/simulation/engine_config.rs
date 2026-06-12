@@ -33,12 +33,12 @@ fn make_preset(name: &'static str) -> Option<(IsotropicProps3D, &'static str)> {
         "Steel (mild)" => IsotropicProps3D {
             elasticity_modulus: 2.0e11,
             poissons_ratio: 0.30,
-            bulk: bulk(7850.0, 200.0, 1.0e6, 4.0e8, 4.0e8),
+            bulk: bulk(7850.0, 50.0, 1.0e6, 4.0e8, 4.0e8),
         },
         "Aluminum (6061)" => IsotropicProps3D {
             elasticity_modulus: 6.9e10,
             poissons_ratio: 0.33,
-            bulk: bulk(2700.0, 150.0, 5.0e5, 2.7e8, 2.7e8),
+            bulk: bulk(2700.0, 50.0, 5.0e5, 2.7e8, 2.7e8),
         },
         "Concrete" => IsotropicProps3D {
             elasticity_modulus: 3.0e10,

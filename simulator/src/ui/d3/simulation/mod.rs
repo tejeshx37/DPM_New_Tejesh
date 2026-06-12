@@ -261,7 +261,7 @@ fn default_duration() -> f32 {
     1.0e-2
 }
 fn default_steps_per_frame() -> u32 {
-    50
+    10
 }
 
 impl Default for State {
@@ -486,7 +486,7 @@ pub fn show(
                     let kernel = state.gpu_kernel.as_mut().unwrap();
                     match kernel.compute_stresses(c) {
                         Ok(stresses) => {
-                            c.apply_external_stresses(&stresses);
+                            c.apply_external_stresses_with_failure(&stresses);
                             c.assemble_forces_and_integrate();
                         }
                         Err(e) => {
@@ -741,12 +741,10 @@ fn add_integration_controls(state: &mut State, ui: &mut Ui) {
                 state.gpu_status = None;
             }
             state.use_gpu_stresses = false;
-            let reason = if !matches!(state.material, MaterialProps3D::Isotropic(_)) {
-                "GPU disabled: isotropic material only"
-            } else {
-                "GPU disabled: failure criteria active"
-            };
-            ui.colored_label(Color32::from_rgb(255, 160, 100), reason);
+            ui.colored_label(
+                Color32::from_rgb(255, 160, 100),
+                "GPU disabled: isotropic material only",
+            );
         }
     });
     if state.use_gpu_stresses {
