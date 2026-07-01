@@ -103,7 +103,10 @@ impl OrbitCamera {
         (right, up, forward)
     }
 
-    fn eye(&self) -> Vector3<f64> {
+    /// World-space camera eye (viewpoint) position. Public so screen-to-world
+    /// raycasting (area-selection tool on the Meshing page) can construct a
+    /// ray origin without duplicating the orbit math here.
+    pub fn eye(&self) -> Vector3<f64> {
         let (_r, _u, fwd) = self.basis();
         Vector3::from(self.focus) - fwd * self.distance
     }

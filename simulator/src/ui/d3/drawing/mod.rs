@@ -7,6 +7,7 @@
 //! touching the page or dialog code.
 
 pub mod dialogs;
+pub mod raycast;
 pub mod shape;
 pub mod viewport;
 

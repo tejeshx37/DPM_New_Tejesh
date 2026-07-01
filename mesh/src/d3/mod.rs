@@ -4,7 +4,10 @@
 
 pub mod cuboid;
 pub mod cylinder;
+pub mod grading;
 pub mod sphere;
+
+pub use grading::DensityHint;
 
 use nalgebra::Vector3;
 use serde::{Deserialize, Serialize};

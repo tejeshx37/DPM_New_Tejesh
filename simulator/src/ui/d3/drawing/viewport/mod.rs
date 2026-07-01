@@ -146,3 +146,63 @@ pub fn project(view_proj: &Matrix4<f64>, rect: egui::Rect, p: Vector3<f64>) -> O
     let y = rect.top() + ((1.0 - (ndc_y + 1.0) * 0.5) as f32) * rect.height();
     Some(Pos2::new(x, y))
 }
+
+/// Build a world-space ray (origin, normalized direction) from a screen
+/// point, the exact inverse of [`project`]. Used by the Meshing page's
+/// area-selection tool to figure out which shape/surface point the user
+/// clicked on.
+///
+/// Unprojects two points along the same screen-space ray (near and far NDC
+/// depth) through the inverse view-projection matrix and derives the
+/// direction from their difference — this naturally recovers the camera eye
+/// as the ray origin without needing it as a separate input.
+pub fn ray_from_screen(
+    view_proj: &Matrix4<f64>,
+    rect: egui::Rect,
+    screen_pos: Pos2,
+) -> Option<(Vector3<f64>, Vector3<f64>)> {
+    let inv = view_proj.try_inverse()?;
+
+    let ndc_x = ((screen_pos.x - rect.left()) / rect.width().max(1.0)) as f64 * 2.0 - 1.0;
+    let ndc_y = 1.0 - ((screen_pos.y - rect.top()) / rect.height().max(1.0)) as f64 * 2.0;
+
+    let unproject = |ndc_z: f64| -> Option<Vector3<f64>> {
+        let clip = nalgebra::Vector4::new(ndc_x, ndc_y, ndc_z, 1.0);
+        let world = inv * clip;
+        if world.w.abs() < 1e-12 {
+            return None;
+        }
+        Some(Vector3::new(world.x, world.y, world.z) / world.w)
+    };
+
+    let near = unproject(-1.0)?;
+    let far = unproject(1.0)?;
+    let dir = (far - near).normalize();
+    if !dir.iter().all(|c| c.is_finite()) {
+        return None;
+    }
+    Some((near, dir))
+}
+
+#[cfg(test)]
+mod ray_tests {
+    use super::*;
+    use camera::OrbitCamera;
+
+    #[test]
+    fn project_and_unproject_round_trip() {
+        let camera = OrbitCamera::default();
+        let rect = egui::Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(800.0, 600.0));
+        let view_proj = camera.view_projection(rect.width() / rect.height());
+
+        let world_point = Vector3::new(0.3, -0.2, 0.1);
+        let screen = project(&view_proj, rect, world_point).expect("point should project");
+
+        let (origin, dir) = ray_from_screen(&view_proj, rect, screen).expect("ray should unproject");
+        // The world point should lie on the ray (some positive t along dir).
+        let to_point = world_point - origin;
+        let t = to_point.dot(&dir);
+        let closest = origin + dir * t;
+        assert!((closest - world_point).norm() < 1e-6);
+    }
+}

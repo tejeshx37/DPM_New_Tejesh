@@ -11,7 +11,7 @@
 
 use nalgebra::Vector3;
 
-use super::{BoundaryFaces, BoundaryRegion, Mesh3D};
+use super::{grading, BoundaryFaces, BoundaryRegion, DensityHint, Mesh3D};
 
 /// Generate a tet mesh for a cylinder.
 ///
@@ -22,6 +22,9 @@ use super::{BoundaryFaces, BoundaryRegion, Mesh3D};
 /// - `radial`: number of radial cells from axis to lateral surface (≥ 1).
 /// - `circumferential`: number of θ wedges (≥ 3).
 /// - `axial`: number of axial slabs (≥ 1).
+/// - `density_hints`: optional world-space local density bias. Only the
+///   radial and axial spacing are graded — circumferential (θ) spacing
+///   stays uniform, a v1 simplification (see `grading` module docs).
 pub fn generate(
     base_center: Vector3<f64>,
     axis: Vector3<f64>,
@@ -30,6 +33,7 @@ pub fn generate(
     radial: u32,
     circumferential: u32,
     axial: u32,
+    density_hints: &[DensityHint],
 ) -> Mesh3D {
     let nr = radial.max(1) as usize;
     let nt = circumferential.max(3) as usize;
@@ -42,16 +46,43 @@ pub fn generate(
     };
     let (u, v) = orthonormal_basis(axis_n);
 
+    // Project each world-space hint onto the axial coordinate (distance
+    // along `axis_n` from `base_center`) and the radial coordinate
+    // (distance from the axis line), to grade the z and r spacing
+    // respectively.
+    let axial_bumps: Vec<(f64, f64, f32)> = density_hints
+        .iter()
+        .map(|h| {
+            let rel = h.center_world - base_center;
+            let z = rel.dot(&axis_n).clamp(0.0, height);
+            let sigma = h.radius_world.max(1e-6) * (0.3 + h.falloff as f64);
+            (z, sigma, h.multiplier)
+        })
+        .collect();
+    let radial_bumps: Vec<(f64, f64, f32)> = density_hints
+        .iter()
+        .map(|h| {
+            let rel = h.center_world - base_center;
+            let z = rel.dot(&axis_n);
+            let radial_component = rel - axis_n * z;
+            let r = radial_component.norm().clamp(0.0, radius);
+            let sigma = h.radius_world.max(1e-6) * (0.3 + h.falloff as f64);
+            (r, sigma, h.multiplier)
+        })
+        .collect();
+    let z_levels = grading::graded_axis_positions(0.0, height, nz, &axial_bumps);
+    let r_levels = grading::graded_axis_positions(0.0, radius, nr, &radial_bumps);
+
     // Vertex layout: per axial level k = 0..=nz, one axis vertex followed by
     // (nr * nt) ring vertices. Axis vertex is at radial=0 (shared by all θ).
     let per_level = 1 + nr * nt;
     let mut vertices = Vec::with_capacity(per_level * (nz + 1));
     for k in 0..=nz {
-        let z = (k as f64) / (nz as f64) * height;
+        let z = z_levels[k];
         let center = base_center + axis_n * z;
         vertices.push(center);
         for ir in 1..=nr {
-            let r = (ir as f64) / (nr as f64) * radius;
+            let r = r_levels[ir];
             for it in 0..nt {
                 let theta = (it as f64) / (nt as f64) * std::f64::consts::TAU;
                 vertices.push(center + (u * theta.cos() + v * theta.sin()) * r);
@@ -218,6 +249,7 @@ mod tests {
             2, // nr
             8, // nt
             3, // nz
+            &[],
         );
         // per-level vertex count = 1 + nr*nt = 17, total = 17 * (nz+1) = 68.
         assert_eq!(m.vertices.len(), 17 * 4);
@@ -229,7 +261,7 @@ mod tests {
 
     #[test]
     fn all_indices_in_range() {
-        let m = generate(Vector3::zeros(), Vector3::new(0.0, 0.0, 1.0), 1.0, 1.0, 3, 12, 4);
+        let m = generate(Vector3::zeros(), Vector3::new(0.0, 0.0, 1.0), 1.0, 1.0, 3, 12, 4, &[]);
         let n = m.vertices.len();
         for tet in &m.tetrahedra {
             for &v in tet {
@@ -247,7 +279,7 @@ mod tests {
 
     #[test]
     fn side_region_excludes_axis_and_caps() {
-        let m = generate(Vector3::zeros(), Vector3::new(0.0, 0.0, 1.0), 1.0, 1.0, 2, 8, 2);
+        let m = generate(Vector3::zeros(), Vector3::new(0.0, 0.0, 1.0), 1.0, 1.0, 2, 8, 2, &[]);
         let side = m
             .boundary_faces
             .regions
